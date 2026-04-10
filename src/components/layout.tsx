@@ -105,13 +105,16 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
     }
     return collapsed ? collapsedDrawerWidth : drawerWidth;
   }, [collapsed, isDesktop]);
+  const isCollapsedDesktop = collapsed && isDesktop;
 
   const drawerContent = (
     <Stack
       sx={{
         height: "100%",
-        p: 2,
+        px: isCollapsedDesktop ? 1.25 : 2,
+        py: 2,
         gap: 2,
+        overflow: "hidden",
         color: theme.palette.mode === "dark" ? "#e2e8f0" : "text.primary",
         bgcolor:
           theme.palette.mode === "dark"
@@ -127,15 +130,20 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
             : "none",
       }}
     >
-      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+      <Stack
+        direction={isCollapsedDesktop ? "column" : "row"}
+        alignItems="center"
+        justifyContent="space-between"
+        spacing={isCollapsedDesktop ? 1 : 1}
+      >
         <Stack
-          direction="row"
+          direction={isCollapsedDesktop ? "column" : "row"}
           alignItems="center"
-          spacing={1.25}
+          justifyContent="center"
+          spacing={isCollapsedDesktop ? 0.75 : 1.25}
           sx={{
             minWidth: 0,
-            opacity: collapsed && isDesktop ? 0 : 1,
-            transition: "opacity 0.2s ease",
+            width: isCollapsedDesktop ? "100%" : "auto",
           }}
         >
           <Box
@@ -151,21 +159,28 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
           >
             <GridViewRoundedIcon />
           </Box>
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-              Canvas Helper
-            </Typography>
-            <Typography
-              variant="caption"
-              color={theme.palette.mode === "dark" ? "rgba(226,232,240,0.66)" : "text.secondary"}
-            >
-              Workspace
-            </Typography>
-          </Box>
+          {isCollapsedDesktop ? null : (
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                Canvas Helper
+              </Typography>
+              <Typography
+                variant="caption"
+                color={theme.palette.mode === "dark" ? "rgba(226,232,240,0.66)" : "text.secondary"}
+              >
+                Workspace
+              </Typography>
+            </Box>
+          )}
         </Stack>
 
         {isDesktop ? (
-          <IconButton onClick={() => setCollapsed((prev) => !prev)}>
+          <IconButton
+            onClick={() => setCollapsed((prev) => !prev)}
+            sx={{
+              alignSelf: isCollapsedDesktop ? "center" : "auto",
+            }}
+          >
             {collapsed ? <ChevronRightRoundedIcon /> : <ChevronLeftRoundedIcon />}
           </IconButton>
         ) : (
@@ -175,7 +190,7 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
         )}
       </Stack>
 
-      {!collapsed || !isDesktop ? (
+      {!isCollapsedDesktop ? (
         <Chip
           label={currentTitle}
           color="primary"
@@ -194,87 +209,100 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
         />
       ) : null}
 
-      <List sx={{ p: 0, display: "grid", gap: 0.75 }}>
-        {navigationItems.map((item) => {
-          const selected = currentKey === item.key;
-          const button = (
-            <ListItemButton
-              key={item.key}
-              component={Link}
-              to={item.path}
-              selected={selected}
-              sx={{
-                minHeight: 52,
-                px: collapsed && isDesktop ? 1.25 : 1.5,
-                py: 1,
-                borderRadius: "18px",
-                justifyContent: collapsed && isDesktop ? "center" : "flex-start",
-                color:
-                  theme.palette.mode === "dark"
-                    ? alpha("#e2e8f0", selected ? 1 : 0.86)
-                    : "inherit",
-                "&.Mui-selected": {
-                  bgcolor:
-                    theme.palette.mode === "dark"
-                      ? alpha(theme.palette.primary.main, 0.2)
-                      : alpha(theme.palette.primary.main, 0.12),
-                  color: "primary.main",
-                  boxShadow:
-                    theme.palette.mode === "dark"
-                      ? `inset 0 0 0 1px ${alpha(theme.palette.primary.main, 0.18)}`
-                      : "none",
-                },
-                "&:hover": {
-                  bgcolor:
-                    theme.palette.mode === "dark"
-                      ? alpha("#94a3b8", 0.12)
-                      : alpha(theme.palette.primary.main, 0.04),
-                },
-                "&.Mui-selected:hover": {
-                  bgcolor:
-                    theme.palette.mode === "dark"
-                      ? alpha(theme.palette.primary.main, 0.24)
-                      : alpha(theme.palette.primary.main, 0.16),
-                },
-              }}
-            >
-              <ListItemIcon
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          overflowX: "hidden",
+          pr: isCollapsedDesktop ? 0 : 0.5,
+        }}
+      >
+        <List sx={{ p: 0, display: "grid", gap: 0.75 }}>
+          {navigationItems.map((item) => {
+            const selected = currentKey === item.key;
+            const button = (
+              <ListItemButton
+                key={item.key}
+                component={Link}
+                to={item.path}
+                selected={selected}
                 sx={{
-                  minWidth: collapsed && isDesktop ? 0 : 38,
-                  color: "inherit",
-                  justifyContent: "center",
+                  width: "100%",
+                  minHeight: 52,
+                  px: isCollapsedDesktop ? 1.25 : 1.5,
+                  py: 1,
+                  gap: isCollapsedDesktop ? 0 : 1,
+                  borderRadius: "18px",
+                  justifyContent: isCollapsedDesktop ? "center" : "flex-start",
+                  overflow: "hidden",
+                  color:
+                    theme.palette.mode === "dark"
+                      ? alpha("#e2e8f0", selected ? 1 : 0.86)
+                      : "inherit",
+                  "&.Mui-selected": {
+                    bgcolor:
+                      theme.palette.mode === "dark"
+                        ? alpha(theme.palette.primary.main, 0.2)
+                        : alpha(theme.palette.primary.main, 0.12),
+                    color: "primary.main",
+                    boxShadow:
+                      theme.palette.mode === "dark"
+                        ? `inset 0 0 0 1px ${alpha(theme.palette.primary.main, 0.18)}`
+                        : "none",
+                  },
+                  "&:hover": {
+                    bgcolor:
+                      theme.palette.mode === "dark"
+                        ? alpha("#94a3b8", 0.12)
+                        : alpha(theme.palette.primary.main, 0.04),
+                  },
+                  "&.Mui-selected:hover": {
+                    bgcolor:
+                      theme.palette.mode === "dark"
+                        ? alpha(theme.palette.primary.main, 0.24)
+                        : alpha(theme.palette.primary.main, 0.16),
+                  },
                 }}
               >
-                {item.icon}
-              </ListItemIcon>
-              {collapsed && isDesktop ? null : (
-                <ListItemText
-                  primary={item.label}
-                  primaryTypographyProps={{
-                    fontSize: 15,
-                    fontWeight: selected ? 700 : 500,
+                <ListItemIcon
+                  sx={{
+                    minWidth: isCollapsedDesktop ? 0 : 36,
+                    color: "inherit",
+                    justifyContent: "center",
                   }}
-                />
-              )}
-            </ListItemButton>
-          );
+                >
+                  {item.icon}
+                </ListItemIcon>
+                {isCollapsedDesktop ? null : (
+                  <ListItemText
+                    sx={{ minWidth: 0, my: 0 }}
+                    primary={item.label}
+                    primaryTypographyProps={{
+                      fontSize: 15,
+                      fontWeight: selected ? 700 : 500,
+                      noWrap: true,
+                    }}
+                  />
+                )}
+              </ListItemButton>
+            );
 
-          return collapsed && isDesktop ? (
-            <Tooltip key={item.key} title={item.label} placement="right">
-              {button}
-            </Tooltip>
-          ) : (
-            button
-          );
-        })}
-      </List>
-
-      <Box sx={{ flex: 1 }} />
+            return isCollapsedDesktop ? (
+              <Tooltip key={item.key} title={item.label} placement="right">
+                {button}
+              </Tooltip>
+            ) : (
+              button
+            );
+          })}
+        </List>
+      </Box>
 
       <Divider />
 
       <Stack spacing={1.25}>
-        {!collapsed || !isDesktop ? (
+        {!isCollapsedDesktop ? (
           <>
             <Typography variant="caption" color="text.secondary">
               当前版本 {version || "读取中"}

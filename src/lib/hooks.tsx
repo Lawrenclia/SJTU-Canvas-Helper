@@ -47,7 +47,7 @@ import { consoleLog, isMergableFileType, moduleItem2File } from "./utils";
 
 const UPDATE_QRCODE_MESSAGE = '{ "type": "UPDATE_QR_CODE" }';
 const SEND_INTERVAL = 1000 * 25;
-const QRCODE_BASE_URL = "https://jaccount.sjtu.edu.cn/jaccount/confirmscancode";
+const QRCODE_BASE_URL = "https://jaccount.sjtu.edu.cn/jaccount/qrcode";
 const WEBSOCKET_BASE_URL = "wss://jaccount.sjtu.edu.cn/jaccount/sub";
 const QRCODE_TIMEOUT = 1000 * 8;
 

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { save } from "@tauri-apps/plugin-dialog";
 import ClosedCaptionRoundedIcon from "@mui/icons-material/ClosedCaptionRounded";
 import PictureAsPdfRoundedIcon from "@mui/icons-material/PictureAsPdfRounded";
@@ -17,6 +18,7 @@ import {
   DialogContent,
   DialogTitle,
   FormControlLabel,
+  LinearProgress,
   MenuItem,
   Slider,
   Stack,
@@ -51,7 +53,12 @@ import { useAppMessage } from "../lib/message";
 import {
   CanvasVideo,
   DownloadTask,
+  LLMConfig,
   LOG_LEVEL_ERROR,
+  SubtitleSummaryCompletedPayload,
+  SubtitleSummaryFailedPayload,
+  SubtitleSummaryProgressPayload,
+  SubtitleSummaryResult,
   VideoDownloadTask,
   VideoInfo,
   VideoPlayInfo,
@@ -66,6 +73,79 @@ const surfaceCardSx = {
   backgroundImage: "none",
 };
 
+const appWindow = getCurrentWebviewWindow();
+
+const VIDEO_SELECTED_COURSE_STORAGE_KEY = "video_page_selected_course_id";
+const VIDEO_SELECTED_VIDEO_STORAGE_KEY = "video_page_selected_video_id";
+
+function buildVideoSummaryCacheKey(videoId?: string, courseId?: number): string {
+  if (!videoId) {
+    return "";
+  }
+  if (courseId && courseId > 0) {
+    return `${courseId}:${videoId}`;
+  }
+  return videoId;
+}
+
+function buildSummaryPreview(markdown: string, maxLength = 260): string {
+  const plainText = markdown
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_>-]/g, " ")
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!plainText) {
+    return "";
+  }
+
+  if (plainText.length <= maxLength) {
+    return plainText;
+  }
+
+  return `${plainText.slice(0, maxLength).trim()}...`;
+}
+
+function buildSummaryRequestPreview(subtitle: string): string {
+  const trimmed = subtitle.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  return `你是一名认真负责的大学课程助教。请根据以下课堂视频字幕整理一份适合课后复习的课堂笔记。
+输出要求：
+1. 只输出 Markdown 正文，不要使用代码块包住全文，也不要输出额外寒暄。
+2. 使用一个一级标题，标题写成“课堂笔记”或更贴合内容的标题。
+3. 在一级标题后，最先输出一个二级标题 \`课堂内容\`。
+4. \`课堂内容\` 部分必须按时间顺序整理 5-12 条小片段；每条用项目符号表示，尽量以时间戳开头或结尾，并用内联代码包裹。
+5. \`课堂内容\` 的每条都要简短，聚焦该时间段老师讲了什么，不要写成长段。
+6. 在 \`课堂内容\` 之后，再优先包含以下二级标题：课程概览、知识点梳理、课堂通知与任务、待复习问题。
+7. 如果课堂里没有提到某类内容，可以省略对应章节，不要编造。
+8. 关键结论、通知、作业、签到、小测、考试提醒，要整理成清晰的项目符号。
+9. 如果某个知识点或通知能对应到字幕时间，请在该条目末尾补上内联代码时间戳。
+10. 保持语言准确、简洁，像学生可以直接保存的课堂笔记。
+
+以下是字幕：
+  ${trimmed}`;
+}
+
+function createPendingSummaryProgress(
+  taskId: string,
+  message: string
+): SubtitleSummaryProgressPayload {
+  return {
+    uuid: taskId,
+    stage: "queued",
+    processed: 0,
+    total: 0,
+    message,
+  };
+}
+
 function timestampToSeconds(timestamp: string): number {
   const match = timestamp.match(/^\[(\d{2}):(\d{2}):(\d{2}),(\d{1,3})\]$/);
   if (!match) {
@@ -74,6 +154,30 @@ function timestampToSeconds(timestamp: string): number {
 
   const [, hh, mm, ss] = match;
   return Number(hh) * 3600 + Number(mm) * 60 + Number(ss);
+}
+
+function normalizeMarkdownCode(children: unknown): string {
+  if (Array.isArray(children)) {
+    return children.map((item) => String(item ?? "")).join("");
+  }
+  return String(children ?? "");
+}
+
+function hasEnabledLLMConfig(configs?: LLMConfig[], legacyApiKey?: string): boolean {
+  if (configs && configs.some((item) => item.enabled && item.api_key.trim())) {
+    return true;
+  }
+  return Boolean(legacyApiKey?.trim());
+}
+
+function readStoredNumber(key: string): number | null {
+  const value = window.localStorage.getItem(key);
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export default function VideoPage() {
@@ -99,21 +203,117 @@ export default function VideoPage() {
   const [subtitleUrl, setSubtitleUrl] = useState<string | undefined>(undefined);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [summaryContent, setSummaryContent] = useState("");
+  const [summarySubtitleContent, setSummarySubtitleContent] = useState("");
+  const [summaryTaskProgressMap, setSummaryTaskProgressMap] = useState<
+    Record<string, SubtitleSummaryProgressPayload>
+  >({});
   const [showLoginRequiredDialog, setShowLoginRequiredDialog] = useState(false);
   const mainVideoRef = useRef<HTMLVideoElement>(null);
   const subVideoRef = useRef<HTMLVideoElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const firstPlay = useRef(true);
+  const restoredCourseRef = useRef(false);
+  const restoredVideoForCourseRef = useRef<number | null>(null);
+  const currentSummaryTaskKeyRef = useRef("");
 
-  const LinkRenderer = (props: any) => (
-    <a
-      target="_blank"
-      rel="noreferrer"
-      onClick={() => handleMainVideoJump(timestampToSeconds(props.children))}
-    >
-      {props.children}
-    </a>
-  );
+  const applySummaryResult = (summary?: SubtitleSummaryResult | null) => {
+    setSummaryContent(summary?.markdown ?? "");
+    setSummarySubtitleContent(summary?.subtitle_content ?? "");
+  };
+
+  const upsertSummaryTaskProgress = (payload: SubtitleSummaryProgressPayload) => {
+    setSummaryTaskProgressMap((previous) => ({
+      ...previous,
+      [payload.uuid]: payload,
+    }));
+  };
+
+  const removeSummaryTaskProgress = (taskId: string) => {
+    setSummaryTaskProgressMap((previous) => {
+      if (!previous[taskId]) {
+        return previous;
+      }
+      const next = { ...previous };
+      delete next[taskId];
+      return next;
+    });
+  };
+
+  const LinkRenderer = (props: any) => {
+    const label = normalizeMarkdownCode(props.children).trim();
+    const isTimestamp = /^\[\d{2}:\d{2}:\d{2},\d{1,3}\]$/.test(label);
+
+    if (!isTimestamp) {
+      return <code>{props.children}</code>;
+    }
+
+    return (
+      <Box
+        component="button"
+        type="button"
+        onClick={() => handleMainVideoJump(timestampToSeconds(label))}
+        sx={{
+          border: "none",
+          px: 0.75,
+          py: 0.2,
+          borderRadius: 1,
+          cursor: "pointer",
+          fontFamily: "monospace",
+          fontSize: "0.9em",
+          color: "primary.main",
+          backgroundColor: alpha(theme.palette.primary.main, 0.1),
+        }}
+      >
+        {label}
+      </Box>
+    );
+  };
+
+  useEffect(() => {
+    const unlistenProgress = appWindow.listen<SubtitleSummaryProgressPayload>(
+      "subtitle_summary://progress",
+      ({ payload }) => {
+        upsertSummaryTaskProgress(payload);
+      }
+    );
+
+    const unlistenCompleted = appWindow.listen<SubtitleSummaryCompletedPayload>(
+      "subtitle_summary://completed",
+      ({ payload }) => {
+        removeSummaryTaskProgress(payload.uuid);
+        if (currentSummaryTaskKeyRef.current === payload.uuid) {
+          applySummaryResult(payload.summary);
+        }
+        if (payload.saved_to_cache) {
+          messageApi.success(
+            `${payload.video_name || "当前视频"} 课堂笔记已生成，已保存到本地`,
+            0.8
+          );
+          return;
+        }
+        messageApi.warning(
+          payload.message ||
+            `${payload.video_name || "当前视频"} 课堂笔记已生成，但保存到本地失败`
+        );
+      }
+    );
+
+    const unlistenFailed = appWindow.listen<SubtitleSummaryFailedPayload>(
+      "subtitle_summary://failed",
+      ({ payload }) => {
+        removeSummaryTaskProgress(payload.uuid);
+        messageApi.error(
+          `${payload.video_name || "当前视频"} 课堂笔记生成失败：${payload.error}`
+        );
+      }
+    );
+
+    return () => {
+      unlistenProgress.then((fn) => fn());
+      unlistenCompleted.then((fn) => fn());
+      unlistenFailed.then((fn) => fn());
+    };
+  }, [messageApi]);
 
   const handleLoginWebsite = async () => {
     try {
@@ -156,7 +356,12 @@ export default function VideoPage() {
     return success;
   };
 
-  const handleSelectCourse = async (selected: number) => {
+  const handleSelectCourse = async (
+    selected: number,
+    options?: {
+      resetStoredVideo?: boolean;
+    }
+  ) => {
     setOperating(true);
     setSelectedCourseId(selected);
     setVideos([]);
@@ -165,6 +370,11 @@ export default function VideoPage() {
     setPlays([]);
     setMainPlayURL("");
     setMutedPlayURL("");
+    restoredVideoForCourseRef.current = null;
+    window.localStorage.setItem(VIDEO_SELECTED_COURSE_STORAGE_KEY, `${selected}`);
+    if (options?.resetStoredVideo ?? true) {
+      window.localStorage.removeItem(VIDEO_SELECTED_VIDEO_STORAGE_KEY);
+    }
     await handleGetVideos(selected);
     setOperating(false);
   };
@@ -196,6 +406,7 @@ export default function VideoPage() {
       setMainPlayURL("");
       setMutedPlayURL("");
       setSelectedVideo(video);
+      window.localStorage.setItem(VIDEO_SELECTED_VIDEO_STORAGE_KEY, video.videoId);
       await handleGetVideoInfo(video);
     }
   };
@@ -255,32 +466,88 @@ export default function VideoPage() {
     }
   };
 
-  const handleSummarizeSubtitle = async () => {
+  const handleSummarizeSubtitle = async (forceRegenerate = false) => {
     if (!selectedVideo) {
       messageApi.warning("请先选择一个视频");
       return;
     }
+
+    const config = await getConfig();
+    if (!hasEnabledLLMConfig(config.llm_configs, config.llm_api_key)) {
+      messageApi.warning("请先前往设置页配置至少一个启用的 LLM 节点。");
+      return;
+    }
+
+    const currentVideo = selectedVideo;
+    const currentCourseId = selectedCourseId;
+    const cacheKey = buildVideoSummaryCacheKey(
+      currentVideo.videoId,
+      currentCourseId
+    );
+    if (!cacheKey) {
+      messageApi.error("当前视频缺少可用的课堂笔记任务标识。");
+      return;
+    }
+
+    upsertSummaryTaskProgress(
+      createPendingSummaryProgress(
+        cacheKey,
+        forceRegenerate
+          ? "已重新发送给 AI，正在后台生成课堂笔记…"
+          : "已发送给 AI，正在后台生成课堂笔记…"
+      )
+    );
+
     try {
       const videoInfo = (await invoke("get_canvas_video_info", {
-        videoId: selectedVideo.videoId,
+        videoId: currentVideo.videoId,
       })) as VideoInfo;
-      messageApi.open({
-        key: "waiting_response",
-        type: "loading",
-        content: "AI 总结中",
-        duration: 0,
-      });
-      const summary = (await invoke("summarize_subtitle", {
+      const started = (await invoke("start_subtitle_summary", {
         canvasCourseId: videoInfo.courId,
-      })) as string;
-      messageApi.destroy("waiting_response");
-      messageApi.success("AI 总结成功", 0.5);
-      setSummaryContent(summary);
-      setSummaryOpen(true);
+        cacheKey,
+        videoName: currentVideo.videoName,
+      })) as boolean;
+
+      if (started) {
+        return;
+      }
+
+      upsertSummaryTaskProgress(
+        createPendingSummaryProgress(
+          cacheKey,
+          "这个视频的课堂笔记已经在后台生成中了…"
+        )
+      );
     } catch (error) {
-      messageApi.destroy("waiting_response");
-      messageApi.error(`AI 总结时发生错误：${error}`);
+      removeSummaryTaskProgress(cacheKey);
+      messageApi.error(`启动课堂笔记后台任务时发生错误：${error}`);
     }
+  };
+
+  const handleSaveSummary = async () => {
+    if (!summaryContent.trim()) {
+      messageApi.warning("当前没有可导出的课堂笔记内容。");
+      return;
+    }
+
+    const safeVideoName = (selectedVideo?.videoName || "课堂笔记").replace(
+      /[\\\\/:*?"<>|]/g,
+      "_"
+    );
+    const outputPath = await save({
+      defaultPath: `${safeVideoName}.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+
+    if (!outputPath) {
+      return;
+    }
+
+    await invoke("save_path_file", {
+      path: outputPath,
+      content: Array.from(new TextEncoder().encode(summaryContent)),
+    });
+    messageApi.success("课堂笔记已导出", 0.5);
   };
 
   const handleDownloadPPT = async (videoId: string, saveName: string) => {
@@ -566,6 +833,47 @@ export default function VideoPage() {
   }, [mutedPlayURL, subVideoSize]);
 
   useEffect(() => {
+    if (restoredCourseRef.current || courses.data.length === 0) {
+      return;
+    }
+
+    restoredCourseRef.current = true;
+    const storedCourseId = readStoredNumber(VIDEO_SELECTED_COURSE_STORAGE_KEY);
+    if (!storedCourseId || !courses.data.some((course) => course.id === storedCourseId)) {
+      if (storedCourseId) {
+        window.localStorage.removeItem(VIDEO_SELECTED_COURSE_STORAGE_KEY);
+      }
+      return;
+    }
+
+    void handleSelectCourse(storedCourseId, { resetStoredVideo: false });
+  }, [courses.data]);
+
+  useEffect(() => {
+    if (selectedCourseId <= 0 || videos.length === 0) {
+      return;
+    }
+
+    if (restoredVideoForCourseRef.current === selectedCourseId) {
+      return;
+    }
+
+    restoredVideoForCourseRef.current = selectedCourseId;
+    const storedCourseId = readStoredNumber(VIDEO_SELECTED_COURSE_STORAGE_KEY);
+    const storedVideoId = window.localStorage.getItem(VIDEO_SELECTED_VIDEO_STORAGE_KEY);
+    if (storedCourseId !== selectedCourseId || !storedVideoId) {
+      return;
+    }
+
+    if (!videos.some((video) => video.videoId === storedVideoId)) {
+      window.localStorage.removeItem(VIDEO_SELECTED_VIDEO_STORAGE_KEY);
+      return;
+    }
+
+    void handleSelectVideo(storedVideoId);
+  }, [selectedCourseId, videos]);
+
+  useEffect(() => {
     const fetchSubtitle = async () => {
       if (!selectedVideo || !mainPlayURL) {
         setSubtitleUrl(undefined);
@@ -589,9 +897,50 @@ export default function VideoPage() {
     void fetchSubtitle();
   }, [mainPlayURL, selectedVideo]);
 
+  useEffect(() => {
+    if (!selectedVideo) {
+      applySummaryResult(null);
+      return;
+    }
+
+    let cancelled = false;
+    const restoreCachedSummary = async () => {
+      const config = await getConfig();
+      const cacheKey = buildVideoSummaryCacheKey(selectedVideo.videoId, selectedCourseId);
+      const cachedSummary =
+        config.video_summary_cache?.[cacheKey] ??
+        config.video_summary_cache?.[selectedVideo.videoId] ??
+        null;
+
+      if (!cancelled) {
+        applySummaryResult(cachedSummary);
+      }
+    };
+
+    void restoreCachedSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCourseId, selectedVideo]);
+
+  const currentSummaryTaskKey = buildVideoSummaryCacheKey(
+    selectedVideo?.videoId,
+    selectedCourseId
+  );
+  const currentSummaryProgress = currentSummaryTaskKey
+    ? summaryTaskProgressMap[currentSummaryTaskKey] ?? null
+    : null;
+  const summaryGenerating = Boolean(currentSummaryProgress);
+
+  useEffect(() => {
+    currentSummaryTaskKeyRef.current = currentSummaryTaskKey;
+  }, [currentSummaryTaskKey]);
+
   const selectedCourse = courses.data.find((course) =>
     course.id === selectedCourseId
   );
+  const summaryPreview = buildSummaryPreview(summaryContent);
+  const summaryRequestPreview = buildSummaryRequestPreview(summarySubtitleContent);
 
   return (
     <BasicLayout>
@@ -675,7 +1024,7 @@ export default function VideoPage() {
                     视频中心
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    选择课程录像，下载视频、字幕、PPT，并支持双屏同步播放。
+                    选择课程录像，下载视频、字幕、PPT，并支持双屏同步播放和课堂笔记生成。
                   </Typography>
                 </Box>
                 {!notLogin ? (
@@ -688,7 +1037,9 @@ export default function VideoPage() {
                   >
                     <CourseSelect
                       courses={courses.data}
+                      disabled={operating}
                       onChange={(courseId) => void handleSelectCourse(courseId)}
+                      value={selectedCourseId === -1 ? undefined : selectedCourseId}
                     />
                   </Box>
                 ) : null}
@@ -791,9 +1142,13 @@ export default function VideoPage() {
                       variant="contained"
                       startIcon={<PsychologyRoundedIcon />}
                       onClick={() => void handleSummarizeSubtitle()}
-                      disabled={!selectedVideo}
+                      disabled={!selectedVideo || summaryGenerating}
                     >
-                      AI 总结
+                      {summaryGenerating
+                        ? "后台生成中..."
+                        : summaryContent.trim()
+                          ? "后台重新生成"
+                          : "后台生成课堂笔记"}
                     </Button>
                   </Stack>
                 </Box>
@@ -808,6 +1163,121 @@ export default function VideoPage() {
 
         {!notLogin ? (
           <>
+            <Card sx={surfaceCardSx}>
+              <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
+                <Stack spacing={2}>
+                  <Box>
+                    <Typography variant="h6" sx={{ fontWeight: 800 }}>
+                      课堂笔记摘要
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      这里会展示当前视频的 AI 课堂笔记摘要，并自动保存在本地配置里。点击顶部按钮后，字幕会发送给 AI 并在后台继续生成；你可以继续浏览页面，生成完成后这里会自动刷新。
+                    </Typography>
+                  </Box>
+
+                  {selectedVideo ? (
+                    <Card
+                      variant="outlined"
+                      sx={{
+                        borderRadius: "22px",
+                        borderColor: alpha(theme.palette.primary.main, 0.16),
+                        bgcolor: alpha(theme.palette.primary.main, 0.05),
+                      }}
+                    >
+                      <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
+                        <Stack spacing={1.5}>
+                          <Stack
+                            direction={{ xs: "column", sm: "row" }}
+                            spacing={1}
+                            justifyContent="space-between"
+                            alignItems={{ xs: "flex-start", sm: "center" }}
+                          >
+                            <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                              {selectedVideo.videoName}
+                            </Typography>
+                            <Chip
+                              size="small"
+                              color={summaryContent.trim() ? "primary" : "default"}
+                              variant="outlined"
+                              label={summaryContent.trim() ? "已缓存到本地" : "尚未生成课堂笔记"}
+                            />
+                          </Stack>
+
+                          {summaryGenerating ? (
+                            <Stack spacing={0.75}>
+                              <Typography variant="body2" color="primary.main">
+                                {currentSummaryProgress?.message ??
+                                  "正在后台生成课堂笔记…"}
+                              </Typography>
+                              <LinearProgress
+                                variant={
+                                  currentSummaryProgress &&
+                                  currentSummaryProgress.total > 0
+                                    ? "determinate"
+                                    : "indeterminate"
+                                }
+                                value={
+                                  currentSummaryProgress &&
+                                  currentSummaryProgress.total > 0
+                                    ? Math.max(
+                                        0,
+                                        Math.min(
+                                          100,
+                                          (currentSummaryProgress.processed /
+                                            currentSummaryProgress.total) *
+                                            100
+                                        )
+                                      )
+                                    : undefined
+                                }
+                              />
+                            </Stack>
+                          ) : null}
+
+                          {summaryContent.trim() ? (
+                            <>
+                              <Typography
+                                variant="body2"
+                                color="text.secondary"
+                                sx={{ lineHeight: 1.8 }}
+                              >
+                                {summaryPreview}
+                              </Typography>
+                              <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                                <Button
+                                  variant="outlined"
+                                  size="small"
+                                  onClick={() => setSummaryOpen(true)}
+                                >
+                                  查看完整课堂笔记
+                                </Button>
+                                <Button
+                                  variant="text"
+                                  size="small"
+                                  onClick={() => void handleSummarizeSubtitle(true)}
+                                  disabled={summaryGenerating}
+                                >
+                                  {summaryGenerating ? "后台生成中..." : "后台重新生成"}
+                                </Button>
+                              </Stack>
+                            </>
+                          ) : (
+                            <Alert severity="info" sx={{ borderRadius: "16px" }}>
+                              当前视频还没有生成课堂笔记。点击上方“后台生成课堂笔记”后，任务会转到后台继续运行；摘要生成完成后会显示在这里，并自动保存到本地。
+                            </Alert>
+                          )}
+                        </Stack>
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    <Alert severity="info" sx={{ borderRadius: "16px" }}>
+                      先选择一个视频，再查看或生成该视频的课堂笔记摘要。
+                    </Alert>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+
             <Card sx={surfaceCardSx}>
               <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
                 <Stack spacing={2}>
@@ -1079,19 +1549,97 @@ export default function VideoPage() {
         open={summaryOpen}
         onClose={() => setSummaryOpen(false)}
         fullWidth
-        maxWidth="md"
+        maxWidth="lg"
       >
-        <DialogTitle>AI 总结</DialogTitle>
+        <DialogTitle>{selectedVideo ? `${selectedVideo.videoName} · 课堂笔记` : "课堂笔记"}</DialogTitle>
         <DialogContent>
-          <Box sx={{ "& a": { color: "primary.main" } }}>
-            <Markdown
-              remarkPlugins={[remarkGfm]}
-              components={{ code: LinkRenderer }}
-            >
-              {summaryContent}
-            </Markdown>
-          </Box>
+          <Stack spacing={2.5} sx={{ py: 1 }}>
+            <Card variant="outlined" sx={{ borderRadius: "20px" }}>
+              <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
+                <Stack spacing={1.5}>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <PsychologyRoundedIcon color="primary" fontSize="small" />
+                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                      课堂笔记
+                    </Typography>
+                  </Stack>
+                  <Box sx={{ "& a": { color: "primary.main" } }}>
+                    <Markdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{ code: LinkRenderer }}
+                    >
+                      {summaryContent}
+                    </Markdown>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+
+            <Card variant="outlined" sx={{ borderRadius: "20px" }}>
+              <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
+                <Stack spacing={1.5}>
+                  <Stack
+                    direction={{ xs: "column", sm: "row" }}
+                    spacing={1}
+                    justifyContent="space-between"
+                    alignItems={{ xs: "flex-start", sm: "center" }}
+                  >
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <ClosedCaptionRoundedIcon color="primary" fontSize="small" />
+                      <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                        发送给 LLM 的请求内容
+                      </Typography>
+                    </Stack>
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={summaryRequestPreview ? "已展示提示词和字幕" : "暂无请求内容"}
+                    />
+                  </Stack>
+
+                  <Alert severity="info" sx={{ borderRadius: "16px" }}>
+                    这里展示的是发送给 LLM 的请求预览：上方提示词加下方整理后字幕。若视频较长，系统会基于这份内容按长度自动分段调用模型。
+                  </Alert>
+
+                  {summaryRequestPreview ? (
+                    <Box
+                      component="pre"
+                      sx={{
+                        m: 0,
+                        p: 2,
+                        borderRadius: "16px",
+                        border: "1px solid",
+                        borderColor: "divider",
+                        bgcolor: alpha(theme.palette.info.main, 0.04),
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        fontSize: 14,
+                        lineHeight: 1.7,
+                        fontFamily:
+                          '"SFMono-Regular", ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace',
+                        maxHeight: 360,
+                        overflowY: "auto",
+                      }}
+                    >
+                      {summaryRequestPreview}
+                    </Box>
+                  ) : (
+                    <Alert severity="warning" sx={{ borderRadius: "16px" }}>
+                      当前没有可展示的请求内容。
+                    </Alert>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+
+          </Stack>
         </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => void handleSaveSummary()}>导出 Markdown</Button>
+          <Button variant="contained" onClick={() => setSummaryOpen(false)}>
+            关闭
+          </Button>
+        </DialogActions>
       </Dialog>
     </BasicLayout>
   );

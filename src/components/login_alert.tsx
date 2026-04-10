@@ -11,10 +11,6 @@ import {
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
 
-function createQRCodePreview(value: string) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(value)}`;
-}
-
 export function LoginAlert({
   qrcode,
   refreshQRCode,
@@ -102,7 +98,7 @@ export function LoginAlert({
             >
               <Box
                 component="img"
-                src={createQRCodePreview(qrcode)}
+                src={qrcode}
                 alt="登录二维码"
                 sx={{
                   width: { xs: "100%", md: 268 },

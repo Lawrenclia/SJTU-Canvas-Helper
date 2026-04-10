@@ -1,4 +1,7 @@
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
+import ArrowDownwardRoundedIcon from "@mui/icons-material/ArrowDownwardRounded";
+import ArrowUpwardRoundedIcon from "@mui/icons-material/ArrowUpwardRounded";
+import LibraryAddRoundedIcon from "@mui/icons-material/LibraryAddRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import FolderOpenRoundedIcon from "@mui/icons-material/FolderOpenRounded";
 import KeyRoundedIcon from "@mui/icons-material/KeyRounded";
@@ -21,11 +24,13 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  FormControlLabel,
   IconButton,
   InputAdornment,
   MenuItem,
   Link as MuiLink,
   Stack,
+  Switch,
   TextField,
   Tooltip,
   Typography
@@ -42,7 +47,7 @@ import LogModal from "../components/log_modal";
 import { getConfig, saveConfig, updateConfig } from "../lib/config";
 import { useConfigDispatch, useQRCode } from "../lib/hooks";
 import { useAppMessage } from "../lib/message";
-import { AccountInfo, AppConfig, LOG_LEVEL_INFO, User } from "../lib/model";
+import { AccountInfo, AppConfig, LLMConfig, LOG_LEVEL_INFO, User } from "../lib/model";
 import { consoleLog, savePathValidator } from "../lib/utils";
 
 type AccountMode = "create" | "select";
@@ -50,6 +55,8 @@ type AccountMode = "create" | "select";
 const SURFACE_RADIUS = 6;
 const DEFAULT_PRIMARY = "#00b96b";
 const DEFAULT_PROXY_PORT = 3030;
+const DEFAULT_LLM_BASE_URL = "https://api.deepseek.com";
+const DEFAULT_LLM_MODEL = "deepseek-chat";
 const CANVAS_TOKEN_URL = "https://oc.sjtu.edu.cn/profile/settings";
 
 const cardSx = {
@@ -68,6 +75,66 @@ const fullWidthChipSx = {
     textAlign: "center",
   },
 };
+
+function createDefaultLLMConfig(): LLMConfig {
+  return {
+    name: "",
+    api_key: "",
+    base_url: DEFAULT_LLM_BASE_URL,
+    model: DEFAULT_LLM_MODEL,
+    enabled: true,
+  };
+}
+
+function normalizeLLMConfigs(config?: Partial<AppConfig> | null): LLMConfig[] {
+  if (!config) {
+    return [];
+  }
+
+  const hasExplicitConfigs = Array.isArray(config.llm_configs);
+  const fallbackConfigs =
+    hasExplicitConfigs
+      ? config.llm_configs ?? []
+      : config.llm_api_key?.trim() || config.llm_base_url?.trim() || config.llm_model?.trim()
+        ? [
+            {
+              name: "默认 LLM",
+              api_key: config.llm_api_key ?? "",
+              base_url: config.llm_base_url ?? "",
+              model: config.llm_model ?? "",
+              enabled: true,
+            } as LLMConfig,
+          ]
+        : [];
+
+  return fallbackConfigs.map((item) => ({
+    name: item.name?.trim() ?? "",
+    api_key: item.api_key ?? "",
+    base_url: item.base_url?.trim() || DEFAULT_LLM_BASE_URL,
+    model: item.model?.trim() || DEFAULT_LLM_MODEL,
+    enabled: item.enabled ?? true,
+  }));
+}
+
+function getPrimaryLLMConfig(configs: LLMConfig[]): LLMConfig | null {
+  return (
+    configs.find((item) => item.enabled && item.api_key.trim()) ??
+    configs.find((item) => item.enabled) ??
+    configs[0] ??
+    null
+  );
+}
+
+function syncLegacyLLMFields(config: AppConfig, configs: LLMConfig[]): AppConfig {
+  const primaryLLM = getPrimaryLLMConfig(configs);
+  return {
+    ...config,
+    llm_configs: configs,
+    llm_api_key: primaryLLM?.api_key ?? "",
+    llm_base_url: primaryLLM?.base_url ?? "",
+    llm_model: primaryLLM?.model ?? "",
+  };
+}
 
 function InlineQRCodePanel({
   onScanSuccess,
@@ -180,6 +247,8 @@ export default function SettingsPage() {
   const [savePathError, setSavePathError] = useState<string>("");
   const [extraLoginReady, setExtraLoginReady] = useState<boolean | null>(null);
   const [checkingExtraLogin, setCheckingExtraLogin] = useState(false);
+  const [llmModelOptions, setLLMModelOptions] = useState<Record<number, string[]>>({});
+  const [loadingLLMModelsIndex, setLoadingLLMModelsIndex] = useState<number | null>(null);
 
   const steps = [
     {
@@ -217,6 +286,12 @@ export default function SettingsPage() {
     }
   }, [rawConfig]);
 
+  const llmConfigs = useMemo(() => normalizeLLMConfigs(formData), [formData]);
+  const enabledLLMCount = useMemo(
+    () => llmConfigs.filter((item) => item.enabled && item.api_key.trim()).length,
+    [llmConfigs]
+  );
+
   const updateField = useCallback(
     <K extends keyof AppConfig>(key: K, value: AppConfig[K]) => {
       setFormData((prev) => {
@@ -231,6 +306,21 @@ export default function SettingsPage() {
       });
     },
     [dispatch]
+  );
+
+  const updateLLMConfigs = useCallback(
+    (updater: (configs: LLMConfig[]) => LLMConfig[]) => {
+      setFormData((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        const nextLLMConfigs = updater(normalizeLLMConfigs(prev));
+        return {
+          ...syncLegacyLLMFields(prev, nextLLMConfigs),
+        };
+      });
+    },
+    []
   );
 
   const checkExtraLoginStatus = async (silent = false) => {
@@ -263,12 +353,20 @@ export default function SettingsPage() {
       await initAccounts();
       const config = await getConfig(true);
       const accountInfo = (await invoke("read_account_info")) as AccountInfo;
-      const normalizedConfig: AppConfig = {
-        ...config,
-        theme: config.theme ?? "light",
-        compact_mode: config.compact_mode ?? false,
-        proxy_port: config.proxy_port === 0 ? DEFAULT_PROXY_PORT : config.proxy_port,
-      };
+      const llmConfigs = normalizeLLMConfigs(config);
+      const normalizedConfig: AppConfig = syncLegacyLLMFields(
+        {
+          ...config,
+          theme: config.theme ?? "light",
+          compact_mode: config.compact_mode ?? false,
+          proxy_port: config.proxy_port === 0 ? DEFAULT_PROXY_PORT : config.proxy_port,
+          llm_configs: llmConfigs,
+          llm_api_key: config.llm_api_key?.trim() ?? "",
+          llm_base_url: config.llm_base_url?.trim() ?? "",
+          llm_model: config.llm_model?.trim() ?? "",
+        },
+        llmConfigs
+      );
 
       setCurrentAccount(accountInfo.current_account);
       setFormData(normalizedConfig);
@@ -276,6 +374,8 @@ export default function SettingsPage() {
       initialSnapshotRef.current = JSON.stringify(normalizedConfig);
       setTokenError("");
       setSavePathError("");
+      setLLMModelOptions({});
+      setLoadingLLMModelsIndex(null);
       setExtraLoginReady(null);
       consoleLog(LOG_LEVEL_INFO, "init config: ", normalizedConfig);
 
@@ -376,8 +476,12 @@ export default function SettingsPage() {
     }
 
     try {
-      await saveConfig(formData);
-      setInitialSnapshot(JSON.stringify(formData));
+      const llmConfigs = normalizeLLMConfigs(formData);
+      const nextConfig = syncLegacyLLMFields(formData, llmConfigs);
+
+      await saveConfig(nextConfig);
+      setFormData(nextConfig);
+      setInitialSnapshot(JSON.stringify(nextConfig));
       messageApi.success("保存成功！");
       if (rawConfig) {
         await getRawConfig();
@@ -404,19 +508,151 @@ export default function SettingsPage() {
   };
 
   const handleTestApiKey = async () => {
+    const llmConfigs = normalizeLLMConfigs(formData);
+
+    if (!llmConfigs.some((item) => item.enabled && item.api_key.trim())) {
+      messageApi.warning("请先添加至少一个启用的 LLM 选项，并填写 API Key。");
+      return;
+    }
+
     try {
       messageApi.open({
         key: "testing",
         type: "loading",
-        content: "正在等待 LLM 答复…",
+        content: "正在按顺序测试 LLM 链路…",
         duration: 0,
       });
-      const resp = await invoke("chat", { prompt: "你好！" });
+      const resp = await invoke("test_llm_chat_chain", {
+        prompt: "你好，请用一句话确认你可以正常工作。",
+        configs: llmConfigs,
+      });
       messageApi.destroy("testing");
       messageApi.success(`来自 LLM 的回复：${resp}`);
     } catch (e) {
       messageApi.destroy("testing");
-      messageApi.error("API Key 无效，请检查后重试。");
+      messageApi.error(`LLM 配置不可用：${e}`);
+    }
+  };
+
+  const handleAddLLMConfig = () => {
+    updateLLMConfigs((configs) => [...configs, createDefaultLLMConfig()]);
+  };
+
+  const handleUpdateLLMConfig = <K extends keyof LLMConfig>(
+    index: number,
+    key: K,
+    value: LLMConfig[K]
+  ) => {
+    if (key === "base_url" || key === "api_key") {
+      setLLMModelOptions((prev) => {
+        const next = { ...prev };
+        delete next[index];
+        return next;
+      });
+    }
+    updateLLMConfigs((configs) =>
+      configs.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [key]: value } : item
+      )
+    );
+  };
+
+  const handleMoveLLMConfig = (index: number, direction: -1 | 1) => {
+    const nextIndex = index + direction;
+    setLoadingLLMModelsIndex((prev) => {
+      if (prev === index) {
+        return nextIndex;
+      }
+      if (prev === nextIndex) {
+        return index;
+      }
+      return prev;
+    });
+    setLLMModelOptions((prev) => {
+      if (nextIndex < 0 || nextIndex >= llmConfigs.length) {
+        return prev;
+      }
+      const next = { ...prev };
+      const currentOptions = prev[index];
+      const targetOptions = prev[nextIndex];
+
+      if (targetOptions !== undefined) {
+        next[index] = targetOptions;
+      } else {
+        delete next[index];
+      }
+
+      if (currentOptions !== undefined) {
+        next[nextIndex] = currentOptions;
+      } else {
+        delete next[nextIndex];
+      }
+
+      return next;
+    });
+
+    updateLLMConfigs((configs) => {
+      if (nextIndex < 0 || nextIndex >= configs.length) {
+        return configs;
+      }
+
+      const nextConfigs = [...configs];
+      [nextConfigs[index], nextConfigs[nextIndex]] = [
+        nextConfigs[nextIndex],
+        nextConfigs[index],
+      ];
+      return nextConfigs;
+    });
+  };
+
+  const handleRemoveLLMConfig = (index: number) => {
+    setLoadingLLMModelsIndex((prev) => {
+      if (prev === null) {
+        return prev;
+      }
+      if (prev === index) {
+        return null;
+      }
+      return prev > index ? prev - 1 : prev;
+    });
+    setLLMModelOptions((prev) => {
+      const next: Record<number, string[]> = {};
+      Object.entries(prev).forEach(([key, value]) => {
+        const currentIndex = Number(key);
+        if (currentIndex < index) {
+          next[currentIndex] = value;
+        } else if (currentIndex > index) {
+          next[currentIndex - 1] = value;
+        }
+      });
+      return next;
+    });
+    updateLLMConfigs((configs) => configs.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const handleFetchLLMModels = async (index: number) => {
+    const config = normalizeLLMConfigs(formData)[index];
+    if (!config) {
+      return;
+    }
+
+    if (!config.api_key.trim()) {
+      messageApi.warning("请先填写该节点的 API Key，再拉取模型列表。");
+      return;
+    }
+
+    try {
+      setLoadingLLMModelsIndex(index);
+      const models = (await invoke("list_llm_models", { config })) as string[];
+      setLLMModelOptions((prev) => ({ ...prev, [index]: models }));
+      if (!models.includes(config.model) && models.length > 0) {
+        handleUpdateLLMConfig(index, "model", models[0]);
+      }
+      messageApi.success(`已获取 ${models.length} 个可用模型。`, 0.8);
+    } catch (error) {
+      messageApi.error(`拉取模型列表失败：${error}`);
+    } finally {
+      setLoadingLLMModelsIndex(null);
     }
   };
 
@@ -916,54 +1152,273 @@ export default function SettingsPage() {
                     <Box>
                       <Typography variant="h5">高级选项</Typography>
                       <Typography variant="body2" color="text.secondary">
-                        这部分用于接入 LLM 功能。
+                        这部分用于接入多个 OpenAI 兼容 LLM。系统会按列表顺序依次尝试，直到某个节点成功返回。
                       </Typography>
                     </Box>
 
-                    <Box
-                      sx={{
-                        display: "grid",
-                        gap: 2,
-                        gridTemplateColumns: { xs: "minmax(0, 1fr)", md: "1fr 220px" },
-                      }}
-                    >
-                      <TextField
-                        label="DeepSeek API Key"
-                        name="llm_api_key"
-                        type={showApiKey ? "text" : "password"}
-                        value={formData?.llm_api_key ?? ""}
-                        onChange={(event) =>
-                          updateField("llm_api_key", event.target.value)
-                        }
-                        placeholder="请输入 DeepSeek API Key…"
-                        helperText="用于启用大语言模型相关能力。"
-                        autoComplete="off"
-                        spellCheck={false}
-                        InputProps={{
-                          endAdornment: (
-                            <InputAdornment position="end">
-                              <Tooltip
-                                title={showApiKey ? "隐藏 API Key" : "显示 API Key"}
-                              >
-                                <IconButton
-                                  aria-label={
-                                    showApiKey ? "隐藏 API Key" : "显示 API Key"
-                                  }
-                                  onClick={() => setShowApiKey((prev) => !prev)}
-                                  edge="end"
+                    <Stack spacing={2}>
+                      <Stack
+                        direction={{ xs: "column", sm: "row" }}
+                        spacing={1.5}
+                        justifyContent="space-between"
+                        alignItems={{ xs: "flex-start", sm: "center" }}
+                      >
+                        <Chip
+                          color={enabledLLMCount > 0 ? "info" : "default"}
+                          label={
+                            enabledLLMCount > 0
+                              ? `已启用 ${enabledLLMCount} 个 LLM 节点`
+                              : "暂未启用任何 LLM 节点"
+                          }
+                          variant={enabledLLMCount > 0 ? "filled" : "outlined"}
+                        />
+                        <Stack direction="row" spacing={1}>
+                          <Button
+                            variant="outlined"
+                            startIcon={
+                              showApiKey ? (
+                                <VisibilityOffRoundedIcon />
+                              ) : (
+                                <VisibilityRoundedIcon />
+                              )
+                            }
+                            onClick={() => setShowApiKey((prev) => !prev)}
+                          >
+                            {showApiKey ? "隐藏全部 Key" : "显示全部 Key"}
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            startIcon={<LibraryAddRoundedIcon />}
+                            onClick={handleAddLLMConfig}
+                          >
+                            添加 LLM
+                          </Button>
+                        </Stack>
+                      </Stack>
+
+                      {llmConfigs.length > 0 ? (
+                        llmConfigs.map((config, index) => (
+                          <Card
+                            key={`llm-config-${index}`}
+                            variant="outlined"
+                            sx={{
+                              borderRadius: "22px",
+                              borderColor: alpha(theme.palette.primary.main, 0.14),
+                              bgcolor: alpha(theme.palette.background.paper, 0.72),
+                            }}
+                          >
+                            <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
+                              <Stack spacing={2}>
+                                <Stack
+                                  direction={{ xs: "column", md: "row" }}
+                                  spacing={1.5}
+                                  justifyContent="space-between"
+                                  alignItems={{ xs: "flex-start", md: "center" }}
                                 >
-                                  {showApiKey ? (
-                                    <VisibilityOffRoundedIcon />
-                                  ) : (
-                                    <VisibilityRoundedIcon />
-                                  )}
-                                </IconButton>
-                              </Tooltip>
-                            </InputAdornment>
-                          ),
-                        }}
-                      />
-                    </Box>
+                                  <Stack direction="row" spacing={1} alignItems="center">
+                                    <Chip
+                                      size="small"
+                                      color="primary"
+                                      variant="outlined"
+                                      label={`顺序 ${index + 1}`}
+                                    />
+                                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                                      {config.name || `LLM ${index + 1}`}
+                                    </Typography>
+                                  </Stack>
+
+                                  <Stack
+                                    direction="row"
+                                    spacing={0.5}
+                                    alignItems="center"
+                                    useFlexGap
+                                    flexWrap="wrap"
+                                  >
+                                    <FormControlLabel
+                                      control={
+                                        <Switch
+                                          checked={config.enabled}
+                                          onChange={(event) =>
+                                            handleUpdateLLMConfig(
+                                              index,
+                                              "enabled",
+                                              event.target.checked
+                                            )
+                                          }
+                                        />
+                                      }
+                                      label="启用"
+                                      sx={{ mr: 0.5 }}
+                                    />
+                                    <Tooltip title="上移">
+                                      <span>
+                                        <IconButton
+                                          size="small"
+                                          disabled={index === 0}
+                                          onClick={() => handleMoveLLMConfig(index, -1)}
+                                        >
+                                          <ArrowUpwardRoundedIcon fontSize="small" />
+                                        </IconButton>
+                                      </span>
+                                    </Tooltip>
+                                    <Tooltip title="下移">
+                                      <span>
+                                        <IconButton
+                                          size="small"
+                                          disabled={index === llmConfigs.length - 1}
+                                          onClick={() => handleMoveLLMConfig(index, 1)}
+                                        >
+                                          <ArrowDownwardRoundedIcon fontSize="small" />
+                                        </IconButton>
+                                      </span>
+                                    </Tooltip>
+                                    <Tooltip title="删除">
+                                      <IconButton
+                                        size="small"
+                                        color="error"
+                                        onClick={() => handleRemoveLLMConfig(index)}
+                                      >
+                                        <DeleteOutlineRoundedIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+                                  </Stack>
+                                </Stack>
+
+                                <Box
+                                  sx={{
+                                    display: "grid",
+                                    gap: 2,
+                                    gridTemplateColumns: {
+                                      xs: "minmax(0, 1fr)",
+                                      md: "1fr 1fr",
+                                    },
+                                  }}
+                                >
+                                  <TextField
+                                    label="节点名称"
+                                    value={config.name}
+                                    onChange={(event) =>
+                                      handleUpdateLLMConfig(index, "name", event.target.value)
+                                    }
+                                    placeholder={`LLM ${index + 1}`}
+                                    helperText="仅用于识别链路中的节点。"
+                                    autoComplete="off"
+                                  />
+                                  <Stack spacing={1}>
+                                    <TextField
+                                      label="LLM Model"
+                                      value={config.model}
+                                      onChange={(event) =>
+                                        handleUpdateLLMConfig(index, "model", event.target.value)
+                                      }
+                                      placeholder={DEFAULT_LLM_MODEL}
+                                      helperText="可手动填写，也可以先调用 API 拉取 /models 后再选择。"
+                                      autoComplete="off"
+                                      spellCheck={false}
+                                    />
+                                    <Stack
+                                      direction={{ xs: "column", sm: "row" }}
+                                      spacing={1}
+                                      alignItems={{ xs: "stretch", sm: "center" }}
+                                    >
+                                      <Button
+                                        variant="outlined"
+                                        size="small"
+                                        onClick={() => void handleFetchLLMModels(index)}
+                                        disabled={loadingLLMModelsIndex === index}
+                                      >
+                                        {loadingLLMModelsIndex === index
+                                          ? "正在拉取模型..."
+                                          : "拉取可用模型"}
+                                      </Button>
+                                      {llmModelOptions[index]?.length ? (
+                                        <TextField
+                                          select
+                                          size="small"
+                                          label="从可用模型中选择"
+                                          value={
+                                            llmModelOptions[index].includes(config.model)
+                                              ? config.model
+                                              : ""
+                                          }
+                                          onChange={(event) =>
+                                            handleUpdateLLMConfig(
+                                              index,
+                                              "model",
+                                              event.target.value
+                                            )
+                                          }
+                                          sx={{ minWidth: { xs: "100%", sm: 220 }, flex: 1 }}
+                                        >
+                                          <MenuItem value="" disabled>
+                                            请选择一个模型
+                                          </MenuItem>
+                                          {llmModelOptions[index].map((modelName) => (
+                                            <MenuItem key={modelName} value={modelName}>
+                                              {modelName}
+                                            </MenuItem>
+                                          ))}
+                                        </TextField>
+                                      ) : null}
+                                    </Stack>
+                                  </Stack>
+                                  <TextField
+                                    label="LLM Base URL"
+                                    value={config.base_url}
+                                    onChange={(event) =>
+                                      handleUpdateLLMConfig(index, "base_url", event.target.value)
+                                    }
+                                    placeholder={DEFAULT_LLM_BASE_URL}
+                                    helperText="可直接填写到 /v1 这一层，例如 https://api.deepseek.com/v1。系统会自动补全 /chat/completions 和 /models，也兼容直接粘贴完整接口。"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                  />
+                                  <TextField
+                                    label="LLM API Key"
+                                    type={showApiKey ? "text" : "password"}
+                                    value={config.api_key}
+                                    onChange={(event) =>
+                                      handleUpdateLLMConfig(index, "api_key", event.target.value)
+                                    }
+                                    placeholder="请输入外部 LLM API Key…"
+                                    helperText="系统会按顺序尝试已启用且填了 Key 的节点。"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    InputProps={{
+                                      endAdornment: (
+                                        <InputAdornment position="end">
+                                          <Tooltip
+                                            title={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+                                          >
+                                            <IconButton
+                                              aria-label={
+                                                showApiKey ? "隐藏 API Key" : "显示 API Key"
+                                              }
+                                              onClick={() => setShowApiKey((prev) => !prev)}
+                                              edge="end"
+                                            >
+                                              {showApiKey ? (
+                                                <VisibilityOffRoundedIcon />
+                                              ) : (
+                                                <VisibilityRoundedIcon />
+                                              )}
+                                            </IconButton>
+                                          </Tooltip>
+                                        </InputAdornment>
+                                      ),
+                                    }}
+                                  />
+                                </Box>
+                              </Stack>
+                            </CardContent>
+                          </Card>
+                        ))
+                      ) : (
+                        <Alert severity="info" sx={{ borderRadius: "18px" }}>
+                          还没有配置 LLM 节点。点击“添加 LLM”后，可为多个 OpenAI 兼容接口设置顺序兜底。
+                        </Alert>
+                      )}
+                    </Stack>
 
                     <Box
                       sx={{
@@ -1021,7 +1476,7 @@ export default function SettingsPage() {
                       onClick={handleTestApiKey}
                       startIcon={<AutoAwesomeRoundedIcon />}
                     >
-                      测试 DeepSeek API Key
+                      测试 LLM 链路
                     </Button>
                     <Button
                       fullWidth
@@ -1069,8 +1524,12 @@ export default function SettingsPage() {
                         sx={fullWidthChipSx}
                       />
                       <Chip
-                        color={formData?.llm_api_key ? "info" : "default"}
-                        label={formData?.llm_api_key ? "LLM 功能已接入" : "LLM 功能未接入"}
+                        color={enabledLLMCount > 0 ? "info" : "default"}
+                        label={
+                          enabledLLMCount > 0
+                            ? `LLM 链路已接入（${enabledLLMCount} 个节点）`
+                            : "LLM 链路未接入"
+                        }
                         sx={fullWidthChipSx}
                       />
                     </Stack>

@@ -1,14 +1,16 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use error::Result;
 use model::{
     Account, AccountInfo, AnnualReport, AppConfig, Assignment, CalendarEvent, CanvasVideo, Colors,
-    Course, DiscussionTopic, File, Folder, FullDiscussion, LogLevel, ModuleItem, QRCodeScanResult,
-    RelationshipTopo, Subject, Submission, User, UserSubmissions, VideoAggregateParams,
-    VideoCourse, VideoInfo, VideoPlayInfo,
+    Course, DiscussionTopic, File, Folder, FullDiscussion, LLMConfig, LogLevel, ModuleItem,
+    QRCodeScanResult, RelationshipTopo, Subject, Submission, SubtitleSummaryCompletedPayload,
+    SubtitleSummaryFailedPayload, SubtitleSummaryProgressPayload, SubtitleSummaryResult, User,
+    UserSubmissions,
+    VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
 };
 
 use dirs::config_dir;
@@ -32,6 +34,8 @@ extern crate lazy_static;
 
 lazy_static! {
     static ref APP: App = App::new();
+    static ref ACTIVE_SUBTITLE_SUMMARY_TASKS: tokio::sync::RwLock<HashSet<String>> =
+        Default::default();
 }
 
 #[tauri::command]
@@ -212,6 +216,19 @@ fn check_path(path: String) -> bool {
 #[tauri::command]
 async fn chat(prompt: String) -> Result<String> {
     APP.chat(prompt).await
+}
+
+#[tauri::command]
+async fn test_llm_chat_chain(
+    prompt: String,
+    configs: Vec<LLMConfig>,
+) -> Result<String> {
+    APP.chat_with_configs(prompt, &configs).await
+}
+
+#[tauri::command]
+async fn list_llm_models(config: LLMConfig) -> Result<Vec<String>> {
+    APP.list_llm_models(&config).await
 }
 
 #[tauri::command]
@@ -581,8 +598,111 @@ async fn download_subtitle(canvas_course_id: i64, save_path: String) -> Result<(
 }
 
 #[tauri::command]
-async fn summarize_subtitle(canvas_course_id: i64) -> Result<String> {
-    APP.summarize_subtitle(canvas_course_id).await
+async fn get_subtitle(canvas_course_id: i64) -> Result<String> {
+    APP.get_subtitle(canvas_course_id).await
+}
+
+#[tauri::command]
+async fn get_subtitle_text(canvas_course_id: i64) -> Result<String> {
+    APP.get_subtitle_text(canvas_course_id).await
+}
+
+#[tauri::command]
+async fn summarize_subtitle<R: Runtime>(
+    window: Window<R>,
+    canvas_course_id: i64,
+    subtitle_content: Option<String>,
+) -> Result<SubtitleSummaryResult> {
+    let task_id = canvas_course_id.to_string();
+    APP.summarize_subtitle(
+        &task_id,
+        canvas_course_id,
+        subtitle_content,
+        |progress: SubtitleSummaryProgressPayload| {
+            let _ = window.emit("subtitle_summary://progress", progress);
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn start_subtitle_summary<R: Runtime>(
+    window: Window<R>,
+    canvas_course_id: i64,
+    cache_key: String,
+    video_name: String,
+    subtitle_content: Option<String>,
+) -> Result<bool> {
+    {
+        let mut tasks = ACTIVE_SUBTITLE_SUMMARY_TASKS.write().await;
+        if tasks.contains(&cache_key) {
+            return Ok(false);
+        }
+        tasks.insert(cache_key.clone());
+    }
+
+    let account = APP.get_current_account().await;
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        let progress_window = window.clone();
+        let summary_result = APP
+            .summarize_subtitle(
+                &cache_key,
+                canvas_course_id,
+                subtitle_content,
+                move |progress: SubtitleSummaryProgressPayload| {
+                    let _ = progress_window.emit("subtitle_summary://progress", progress);
+                },
+            )
+            .await;
+
+        match summary_result {
+            Ok(summary) => {
+                let save_result = APP
+                    .save_video_summary_cache_entry_for_account(&account, &cache_key, &summary)
+                    .await;
+                if let Err(error) = &save_result {
+                    tracing::error!(
+                        "Failed to save subtitle summary cache for {}: {}",
+                        cache_key,
+                        error
+                    );
+                }
+                let _ = window.emit(
+                    "subtitle_summary://completed",
+                    SubtitleSummaryCompletedPayload {
+                        uuid: cache_key.clone(),
+                        video_name: video_name.clone(),
+                        summary,
+                        saved_to_cache: save_result.is_ok(),
+                        message: match save_result {
+                            Ok(_) => "课堂笔记已生成，已保存到本地。".to_owned(),
+                            Err(error) => {
+                                format!("课堂笔记已生成，但保存到本地失败：{error}")
+                            }
+                        },
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = window.emit(
+                    "subtitle_summary://failed",
+                    SubtitleSummaryFailedPayload {
+                        uuid: cache_key.clone(),
+                        video_name: video_name.clone(),
+                        error: error.to_string(),
+                    },
+                );
+            }
+        }
+
+        ACTIVE_SUBTITLE_SUMMARY_TASKS
+            .write()
+            .await
+            .remove(&cache_key);
+    });
+
+    Ok(true)
 }
 
 #[tauri::command]
@@ -755,6 +875,8 @@ async fn main() -> Result<()> {
             login_video_website,
             prepare_proxy,
             stop_proxy,
+            get_subtitle,
+            get_subtitle_text,
             download_subtitle,
             download_ppt,
             list_external_module_items,
@@ -765,8 +887,11 @@ async fn main() -> Result<()> {
             generate_annual_report,
             // LLM
             chat,
+            test_llm_chat_chain,
+            list_llm_models,
             explain_file,
-            summarize_subtitle
+            summarize_subtitle,
+            start_subtitle_summary
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

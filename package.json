@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "node script/tauri-wrapper.mjs"
   },
   "dependencies": {
     "@antv/g6": "^4.8.24",

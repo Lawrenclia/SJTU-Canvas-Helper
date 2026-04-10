@@ -16,16 +16,40 @@ import { useMemo } from "react";
 
 import { Course } from "../lib/model";
 
+interface CourseSelectExtraOption {
+  id: number;
+  label: string;
+  helperText?: string;
+}
+
+type CourseSelectOption =
+  | {
+      id: number;
+      label: string;
+      searchText: string;
+      optionType: "course";
+      course: Course;
+    }
+  | {
+      id: number;
+      label: string;
+      searchText: string;
+      optionType: "extra";
+      helperText?: string;
+    };
+
 export default function CourseSelect({
   courses,
   disabled,
   onChange,
   value,
+  extraOptions,
 }: {
   courses: Course[];
   disabled?: boolean;
   onChange?: (courseId: number) => void;
   value?: number;
+  extraOptions?: CourseSelectExtraOption[];
 }) {
   const formatCourseName = (course: Course): string => {
     const term = course.term.name.replace("Spring", "春").replace("Fall", "秋");
@@ -39,19 +63,32 @@ export default function CourseSelect({
     return `${course.name} | ${term} | ${teacherText}`;
   };
 
-  const formattedCourses = useMemo(() => {
-    return [...courses]
+  const options = useMemo<CourseSelectOption[]>(() => {
+    const pinnedOptions =
+      extraOptions?.map((option) => ({
+        id: option.id,
+        label: option.label,
+        searchText: `${option.label} ${option.helperText ?? ""}`.toLowerCase(),
+        optionType: "extra" as const,
+        helperText: option.helperText,
+      })) ?? [];
+
+    const formattedCourses = [...courses]
       .map((course) => ({
-        ...course,
-        name: formatCourseName(course),
+        id: course.id,
+        label: formatCourseName(course),
+        searchText: formatCourseName(course).toLowerCase(),
+        optionType: "course" as const,
+        course,
       }))
-      .sort((a, b) => b.term.id - a.term.id);
-  }, [courses]);
+      .sort((a, b) => b.course.term.id - a.course.term.id);
 
-  const selectedCourse =
-    formattedCourses.find((course) => course.id === value) ?? null;
+    return [...pinnedOptions, ...formattedCourses];
+  }, [courses, extraOptions]);
 
-  const hasCourses = courses.length > 0;
+  const selectedOption = options.find((option) => option.id === value) ?? undefined;
+
+  const hasCourses = options.length > 0;
   const theme = useTheme();
 
   return (
@@ -87,11 +124,12 @@ export default function CourseSelect({
 
       <Autocomplete
         fullWidth
+        disableClearable
         disabled={disabled || !hasCourses}
-        options={formattedCourses}
-        value={selectedCourse}
+        options={options}
+        value={selectedOption}
         onChange={(_, nextValue) => onChange?.(nextValue?.id ?? -1)}
-        getOptionLabel={(option) => option.name}
+        getOptionLabel={(option) => option.label}
         isOptionEqualToValue={(option, currentValue) => option.id === currentValue.id}
         noOptionsText="暂无可用课程"
         PaperComponent={(props) => (
@@ -108,16 +146,45 @@ export default function CourseSelect({
           />
         )}
         renderOption={(props, option) => {
-          const isTA = option.enrollments?.some(
+          if (option.optionType === "extra") {
+            return (
+              <Box
+                component="li"
+                {...props}
+                sx={{
+                  px: 2,
+                  py: 1.35,
+                  alignItems: "stretch",
+                }}
+              >
+                <Stack spacing={0.65} sx={{ minWidth: 0, width: "100%" }}>
+                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                    <Typography
+                      variant="body2"
+                      sx={{ fontWeight: 700, wordBreak: "break-word" }}
+                    >
+                      {option.label}
+                    </Typography>
+                    <Chip size="small" color="primary" label="置顶选项" />
+                  </Stack>
+                  <Typography variant="caption" color="text.secondary">
+                    {option.helperText ?? "快捷查看聚合结果"}
+                  </Typography>
+                </Stack>
+              </Box>
+            );
+          }
+
+          const isTA = option.course.enrollments?.some(
             (enrollment) => enrollment.role === "TaEnrollment"
           );
           const teacherNames =
-            option.teachers
+            option.course.teachers
               ?.filter((teacher) => teacher?.display_name)
               .map((teacher) => teacher.display_name)
               .slice(0, 2)
               .join("、") || "未知教师";
-          const term = option.term.name.replace("Spring", "春").replace("Fall", "秋");
+          const term = option.course.term.name.replace("Spring", "春").replace("Fall", "秋");
 
           return (
             <Box
@@ -135,7 +202,7 @@ export default function CourseSelect({
                     variant="body2"
                     sx={{ fontWeight: 700, wordBreak: "break-word" }}
                   >
-                    {option.name.split(" | ")[0]}
+                    {option.label.split(" | ")[0]}
                   </Typography>
                   {isTA ? <Chip size="small" color="error" label="助教" /> : null}
                 </Stack>
@@ -163,24 +230,19 @@ export default function CourseSelect({
             return options;
           }
 
-          return options.filter((course) => {
-            const nameMatch = course.name.toLowerCase().includes(keyword);
-            const termMatch = course.term.name.toLowerCase().includes(keyword);
-            const teacherMatch =
-              course.teachers?.some((teacher) =>
-                teacher?.display_name?.toLowerCase().includes(keyword)
-              ) || false;
-
-            return nameMatch || termMatch || teacherMatch;
-          });
+          return options.filter((option) => option.searchText.includes(keyword));
         }}
         renderInput={(params) => (
           <TextField
             {...params}
             placeholder={hasCourses ? "请选择或搜索课程…" : "暂无可用课程"}
             helperText={
-              selectedCourse
-                ? `当前已选：${selectedCourse.name.split(" | ")[0]}`
+              selectedOption
+                ? `当前已选：${
+                    selectedOption.optionType === "course"
+                      ? selectedOption.label.split(" | ")[0]
+                      : selectedOption.label
+                  }`
                 : "优先展示最近学期课程，支持关键字快速定位。"
             }
             sx={{

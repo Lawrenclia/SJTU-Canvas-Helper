@@ -4,7 +4,7 @@ import ReactEcharts from "echarts-for-react";
 
 // Grade Overview Component in Assignment Section
 // assignment id -> grade status
-export function GradeOverviewChart({ gradeMap }: { gradeMap: Map<number, GradeStatus> }) {
+export function GradeOverviewChart({ gradeMap }: { gradeMap: Map<string, GradeStatus> }) {
     const [options, setOptions] = useState<any>({});
     useEffect(() => { initOptions() }, [gradeMap]);
     const initOptions = () => {

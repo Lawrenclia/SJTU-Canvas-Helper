@@ -68,6 +68,14 @@ const surfaceCardSx = {
   backgroundImage: "none",
 };
 
+const ALL_COURSES_OPTION_ID = -2;
+
+function buildAssignmentKey(
+  assignment: Pick<Assignment, "course_id" | "id">
+): string {
+  return `${assignment.course_id}-${assignment.id}`;
+}
+
 export default function AssignmentsPage() {
   const theme = useTheme();
   const [messageApi, contextHolder] = useAppMessage();
@@ -75,10 +83,13 @@ export default function AssignmentsPage() {
   const [onlyShowUnfinished, setOnlyShowUnfinished] = useState(true);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<number>(-1);
+  const [selectionMode, setSelectionMode] = useState<"single_course" | "all_courses">(
+    "single_course"
+  );
   const { previewer, onHoverEntry, onLeaveEntry, setPreviewEntry } =
     usePreview();
-  const [linksMap, setLinksMap] = useState<Record<number, Attachment[]>>({});
-  const [expandedAssignmentIds, setExpandedAssignmentIds] = useState<number[]>(
+  const [linksMap, setLinksMap] = useState<Record<string, Attachment[]>>({});
+  const [expandedAssignmentIds, setExpandedAssignmentIds] = useState<string[]>(
     []
   );
   const [showModifyDDLModal, setShowModifyDDLModal] = useState(false);
@@ -89,17 +100,33 @@ export default function AssignmentsPage() {
   const [selectedAssignment, setSelectedAssignment] = useState<
     Assignment | undefined
   >();
-  const [gradeMap, setGradeMap] = useState<Map<number, GradeStatus>>(new Map());
+  const [gradeMap, setGradeMap] = useState<Map<string, GradeStatus>>(new Map());
   const [searchParams, setSearchParams] = useSearchParams();
   const courses = useCourses();
   const me = useMe();
   const baseURL = useBaseURL();
+  const courseNameMap = useMemo(
+    () => new Map(courses.data.map((course) => [course.id, course.name])),
+    [courses.data]
+  );
+  const latestTermId = useMemo(
+    () => Math.max(...courses.data.map((course) => course.term.id), -1),
+    [courses.data]
+  );
+  const latestTermCourses = useMemo(
+    () =>
+      latestTermId === -1
+        ? []
+        : courses.data.filter((course) => course.term.id === latestTermId),
+    [courses.data, latestTermId]
+  );
 
   useEffect(() => {
     if (courses.data.length > 0) {
       const courseId = Number.parseInt(searchParams.get("id") ?? "");
       if (courseId > 0) {
         setSearchParams({});
+        setSelectionMode("single_course");
         setSelectedCourseId(courseId);
         void handleGetAssignments(courseId, onlyShowUnfinished);
       }
@@ -107,7 +134,7 @@ export default function AssignmentsPage() {
   }, [courses.data, onlyShowUnfinished, searchParams, setSearchParams]);
 
   useEffect(() => {
-    const nextGradeMap = new Map<number, GradeStatus>();
+    const nextGradeMap = new Map<string, GradeStatus>();
     assignments.forEach((assignment) => {
       const actualGrade = Number.parseInt(assignment.submission?.grade ?? "0");
       let maxGrade = assignment.points_possible ?? 0;
@@ -120,14 +147,18 @@ export default function AssignmentsPage() {
       if (maxGrade < actualGrade) {
         maxGrade = actualGrade;
       }
-      nextGradeMap.set(assignment.id, {
-        assignmetName: assignment.name,
+      const assignmentDisplayName =
+        selectionMode === "all_courses"
+          ? `【${courseNameMap.get(assignment.course_id) ?? "未知课程"}】${assignment.name}`
+          : assignment.name;
+      nextGradeMap.set(buildAssignmentKey(assignment), {
+        assignmetName: assignmentDisplayName,
         actualGrade,
         maxGrade,
       } as GradeStatus);
     });
     setGradeMap(nextGradeMap);
-  }, [assignments]);
+  }, [assignments, courseNameMap, selectionMode]);
 
   const isTAOrTeacher = (courseId: number) => {
     const course = courses.data.find((item) => item.id === courseId);
@@ -158,39 +189,109 @@ export default function AssignmentsPage() {
     return { total, ended, submitted, unfinished };
   }, [assignments]);
 
+  const sortAssignments = (items: Assignment[]) =>
+    [...items].sort((left, right) => {
+      const leftDue = dayjs(getBaseDate(left.all_dates)?.due_at ?? left.due_at);
+      const rightDue = dayjs(getBaseDate(right.all_dates)?.due_at ?? right.due_at);
+      const leftValid = leftDue.isValid();
+      const rightValid = rightDue.isValid();
+
+      if (leftValid && rightValid && leftDue.valueOf() !== rightDue.valueOf()) {
+        return leftDue.valueOf() - rightDue.valueOf();
+      }
+      if (leftValid !== rightValid) {
+        return leftValid ? -1 : 1;
+      }
+      return left.name.localeCompare(right.name, "zh-CN");
+    });
+
+  const fetchAssignmentsForCourse = async (
+    courseId: number,
+    onlyShowUnfinishedValue: boolean
+  ) => {
+    const nextLinksMap: Record<string, Attachment[]> = {};
+    let nextAssignments = (await invoke("list_course_assignments", {
+      courseId,
+    })) as Assignment[];
+    nextAssignments = nextAssignments.map((assignment) => ({ ...assignment }));
+    if (!isTAOrTeacher(courseId) && onlyShowUnfinishedValue) {
+      nextAssignments = nextAssignments.filter(
+        (assignment) =>
+          assignment.submission?.workflow_state === "unsubmitted"
+      );
+    }
+    nextAssignments.forEach((assignment) =>
+      dealWithDescription(assignment, nextLinksMap)
+    );
+
+    return {
+      assignments: nextAssignments,
+      linksMap: nextLinksMap,
+    };
+  };
+
   const handleGetAssignments = async (
     courseId: number,
     onlyShowUnfinishedValue: boolean
   ) => {
-    if (courseId === -1) {
+    if (courseId <= 0) {
       return;
     }
     setOperating(true);
     try {
-      const nextLinksMap: Record<number, Attachment[]> = {};
-      let nextAssignments = (await invoke("list_course_assignments", {
+      const result = await fetchAssignmentsForCourse(
         courseId,
-      })) as Assignment[];
-      nextAssignments = nextAssignments.map((assignment) => ({
-        ...assignment,
-        key: assignment.id,
-      }));
-      if (!isTAOrTeacher(courseId) && onlyShowUnfinishedValue) {
-        nextAssignments = nextAssignments.filter(
-          (assignment) =>
-            assignment.submission?.workflow_state === "unsubmitted"
-        );
-      }
-      nextAssignments.forEach((assignment) =>
-        dealWithDescription(assignment, nextLinksMap)
+        onlyShowUnfinishedValue
       );
-      setLinksMap(nextLinksMap);
-      setAssignments(nextAssignments);
+      setSelectionMode("single_course");
+      setLinksMap(result.linksMap);
+      setAssignments(sortAssignments(result.assignments));
       setExpandedAssignmentIds([]);
     } catch (error) {
       messageApi.error(error as string);
     }
     setOperating(false);
+  };
+
+  const handleGetAllAssignments = async (
+    onlyShowUnfinishedValue: boolean
+  ) => {
+    if (latestTermCourses.length === 0) {
+      return;
+    }
+    setOperating(true);
+    try {
+      const results = await Promise.all(
+        latestTermCourses.map((course) =>
+          fetchAssignmentsForCourse(course.id, onlyShowUnfinishedValue)
+        )
+      );
+      setSelectionMode("all_courses");
+      setSelectedCourseId(ALL_COURSES_OPTION_ID);
+      setLinksMap(
+        results.reduce<Record<string, Attachment[]>>(
+          (acc, result) => ({ ...acc, ...result.linksMap }),
+          {}
+        )
+      );
+      setAssignments(
+        sortAssignments(results.flatMap((result) => result.assignments))
+      );
+      setExpandedAssignmentIds([]);
+    } catch (error) {
+      messageApi.error(error as string);
+    }
+    setOperating(false);
+  };
+
+  const refreshAssignmentsForCurrentSelection = async (
+    onlyShowUnfinishedValue = onlyShowUnfinished
+  ) => {
+    if (selectionMode === "all_courses") {
+      await handleGetAllAssignments(onlyShowUnfinishedValue);
+      return;
+    }
+    await handleGetAssignments(selectedCourseId, onlyShowUnfinishedValue);
   };
 
   const handleDownloadAttachment = async (attachment: Attachment) => {
@@ -204,10 +305,15 @@ export default function AssignmentsPage() {
   };
 
   const handleCourseSelect = async (courseId: number) => {
+    if (courseId === ALL_COURSES_OPTION_ID) {
+      await handleGetAllAssignments(onlyShowUnfinished);
+      return;
+    }
     const selectedCourse = courses.data.find((course) => course.id === courseId);
     if (!selectedCourse) {
       return;
     }
+    setSelectionMode("single_course");
     setSelectedCourseId(courseId);
     await handleGetAssignments(courseId, onlyShowUnfinished);
   };
@@ -217,12 +323,16 @@ export default function AssignmentsPage() {
   ) => {
     const nextValue = event.target.checked;
     setOnlyShowUnfinished(nextValue);
+    if (selectionMode === "all_courses") {
+      await handleGetAllAssignments(nextValue);
+      return;
+    }
     await handleGetAssignments(selectedCourseId, nextValue);
   };
 
   const dealWithDescription = (
     assignment: Assignment,
-    nextLinksMap: Record<number, Attachment[]>
+    nextLinksMap: Record<string, Attachment[]>
   ) => {
     if (!assignment.description) {
       return;
@@ -232,11 +342,11 @@ export default function AssignmentsPage() {
     const anchorTags = document.querySelectorAll("a");
     const downloadableRegex =
       /https:\/\/oc\.sjtu\.edu\.cn\/courses\/(\d+)\/files\/(\d+)/g;
-    const id = assignment.id;
-    if (!nextLinksMap[id]) {
-      nextLinksMap[id] = [];
+    const key = buildAssignmentKey(assignment);
+    if (!nextLinksMap[key]) {
+      nextLinksMap[key] = [];
     }
-    const links = nextLinksMap[id];
+    const links = nextLinksMap[key];
     anchorTags.forEach((anchorTag) => {
       anchorTag.setAttribute("target", "_blank");
       const result = anchorTag.href.match(downloadableRegex);
@@ -275,16 +385,17 @@ export default function AssignmentsPage() {
 
   const handleDeleteComment = async (
     commentId: number,
-    assignmentId: number
+    assignmentId: number,
+    courseId: number
   ) => {
     try {
       await invoke("delete_my_submission_comment", {
-        courseId: selectedCourseId,
+        courseId,
         assignmentId,
         commentId,
       });
       messageApi.success("删除成功", 0.5);
-      await handleGetMySingleSubmission(selectedCourseId, assignmentId);
+      await handleGetMySingleSubmission(courseId, assignmentId);
     } catch (error) {
       consoleLog(LOG_LEVEL_ERROR, error);
       messageApi.error(error as string);
@@ -292,14 +403,17 @@ export default function AssignmentsPage() {
   };
 
   const toggleExpanded = async (assignment: Assignment) => {
-    const expanded = expandedAssignmentIds.includes(assignment.id);
+    const assignmentKey = buildAssignmentKey(assignment);
+    const expanded = expandedAssignmentIds.includes(assignmentKey);
     if (expanded) {
-      setExpandedAssignmentIds((prev) => prev.filter((id) => id !== assignment.id));
+      setExpandedAssignmentIds((prev) =>
+        prev.filter((id) => id !== assignmentKey)
+      );
       return;
     }
-    setExpandedAssignmentIds((prev) => [...prev, assignment.id]);
-    if (!isTAOrTeacher(selectedCourseId)) {
-      await handleGetMySingleSubmission(selectedCourseId, assignment.id);
+    setExpandedAssignmentIds((prev) => [...prev, assignmentKey]);
+    if (!isTAOrTeacher(assignment.course_id)) {
+      await handleGetMySingleSubmission(assignment.course_id, assignment.id);
     }
   };
 
@@ -451,21 +565,19 @@ export default function AssignmentsPage() {
           open={showModifyDDLModal}
           assignment={assignmentToModify}
           handleCancel={() => setShowModifyDDLModal(false)}
-          onRefresh={() =>
-            void handleGetAssignments(selectedCourseId, onlyShowUnfinished)
-          }
+          onRefresh={() => void refreshAssignmentsForCurrentSelection()}
           onSuccess={() => {
             setShowModifyDDLModal(false);
-            void handleGetAssignments(selectedCourseId, onlyShowUnfinished);
+            void refreshAssignmentsForCurrentSelection();
           }}
-          courseId={selectedCourseId}
+          courseId={assignmentToModify.course_id}
         />
       ) : null}
       {selectedAssignment ? (
         <SubmitModal
           open={showModal}
           allowed_extensions={selectedAssignment.allowed_extensions}
-          courseId={selectedCourseId}
+          courseId={selectedAssignment.course_id}
           assignmentId={selectedAssignment.id}
           onCancel={() => setShowModal(false)}
           onSubmit={() => {
@@ -473,7 +585,7 @@ export default function AssignmentsPage() {
             setSelectedAssignment(undefined);
             messageApi.success("提交成功", 0.5);
             void handleGetMySingleSubmission(
-              selectedCourseId,
+              selectedAssignment.course_id,
               selectedAssignment.id
             );
           }}
@@ -522,7 +634,16 @@ export default function AssignmentsPage() {
                     onChange={(courseId) => void handleCourseSelect(courseId)}
                     disabled={operating}
                     courses={courses.data}
-                    value={selectedCourseId === -1 ? undefined : selectedCourseId}
+                    extraOptions={[
+                      {
+                        id: ALL_COURSES_OPTION_ID,
+                        label: "全部课程",
+                        helperText: "聚合展示最新学期所有课程的作业",
+                      },
+                    ]}
+                    value={
+                      selectedCourseId === -1 ? undefined : selectedCourseId
+                    }
                   />
                 </Box>
               </Stack>
@@ -571,7 +692,7 @@ export default function AssignmentsPage() {
                 justifyContent="space-between"
                 spacing={2}
               >
-                {!isTAOrTeacher(selectedCourseId) ? (
+                {!selectedCourse || !isTAOrTeacher(selectedCourseId) ? (
                   <FormControlLabel
                     control={
                       <Checkbox
@@ -587,7 +708,14 @@ export default function AssignmentsPage() {
                 ) : (
                   <Chip label="教师 / 助教模式" color="primary" variant="outlined" />
                 )}
-                {selectedCourse ? (
+                {selectionMode === "all_courses" ? (
+                  <Chip
+                    icon={<CalendarMonthRoundedIcon />}
+                    label="全部课程"
+                    color="primary"
+                    variant="outlined"
+                  />
+                ) : selectedCourse ? (
                   <Chip
                     icon={<CalendarMonthRoundedIcon />}
                     label={selectedCourse.name}
@@ -618,7 +746,12 @@ export default function AssignmentsPage() {
 
         <Stack spacing={2.25}>
           {assignments.map((assignment) => {
-            const expanded = expandedAssignmentIds.includes(assignment.id);
+            const assignmentKey = buildAssignmentKey(assignment);
+            const assignmentDisplayName =
+              selectionMode === "all_courses"
+                ? `【${courseNameMap.get(assignment.course_id) ?? "未知课程"}】${assignment.name}`
+                : assignment.name;
+            const expanded = expandedAssignmentIds.includes(assignmentKey);
             const submission = assignment.submission ?? undefined;
             const attachments =
               submission?.attachments?.map((attachment) => ({
@@ -631,11 +764,12 @@ export default function AssignmentsPage() {
               ? `${assignment.submission?.grade ?? 0}/${assignment.points_possible}`
               : assignment.submission?.grade ?? "-";
             const stats = assignment.score_statistics as ScoreStatistic | null;
+            const isStaffAssignment = isTAOrTeacher(assignment.course_id);
             const now = dayjs();
             const lockAt = dayjs(assignment.lock_at);
             const dueAt = dayjs(assignment.due_at);
             const allowSubmit =
-              !isTAOrTeacher(selectedCourseId) &&
+              !isStaffAssignment &&
               !!assignment.submission &&
               !assignment.submission_types.includes("none") &&
               !assignment.submission_types.includes("not_graded") &&
@@ -643,7 +777,7 @@ export default function AssignmentsPage() {
               !now.isAfter(dueAt);
 
             return (
-              <Card key={assignment.id} sx={surfaceCardSx}>
+              <Card key={assignmentKey} sx={surfaceCardSx}>
                 <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
                   <Stack spacing={2.5}>
                     <Stack
@@ -660,7 +794,7 @@ export default function AssignmentsPage() {
                           useFlexGap
                         >
                           <Typography variant="h5" sx={{ fontWeight: 800 }}>
-                            {assignment.name}
+                            {assignmentDisplayName}
                           </Typography>
                           {getAssignmentStatusChips(assignment, submission)}
                         </Stack>
@@ -726,7 +860,7 @@ export default function AssignmentsPage() {
                       >
                         在 Canvas 打开
                       </Button>
-                      {isTAOrTeacher(selectedCourseId) ? (
+                      {isStaffAssignment ? (
                         <Button
                           variant="text"
                           startIcon={<EditCalendarRoundedIcon />}
@@ -791,7 +925,7 @@ export default function AssignmentsPage() {
                           <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1.25 }}>
                             作业附件
                           </Typography>
-                          {renderAttachmentsTable(linksMap[assignment.id])}
+                          {renderAttachmentsTable(linksMap[assignmentKey])}
                         </Box>
 
                         <Box>
@@ -821,7 +955,8 @@ export default function AssignmentsPage() {
                                           onClick={() =>
                                             void handleDeleteComment(
                                               comment.id,
-                                              assignment.id
+                                              assignment.id,
+                                              assignment.course_id
                                             )
                                           }
                                         >

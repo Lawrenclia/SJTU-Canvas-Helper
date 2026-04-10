@@ -10,15 +10,28 @@ use crate::{
     error::{AppError, Result},
     model::{
         Assignment, CalendarEvent, Colors, Course, DiscussionTopic, File, Folder, FoldersAndFiles,
-        FullDiscussion, Module, ModuleItem, ProgressPayload, RelationshipEdge, RelationshipNode,
-        RelationshipNodeType, RelationshipTopo, Submission, SubmissionUploadResult,
-        SubmissionUploadSuccessResponse, User, UserSubmissions,
+        FullDiscussion, LLMConfig, Module, ModuleItem, ProgressPayload, RelationshipEdge,
+        RelationshipNode, RelationshipNodeType, RelationshipTopo, Submission,
+        SubmissionUploadResult, SubmissionUploadSuccessResponse, User, UserSubmissions,
     },
     utils::{self, file::get_file_name},
 };
 
 // Apis here are for canvas
 impl Client {
+    fn legacy_llm_configs<S: Into<String>>(llm_api_key: S) -> Vec<LLMConfig> {
+        let api_key = llm_api_key.into();
+        if api_key.trim().is_empty() {
+            vec![]
+        } else {
+            vec![LLMConfig {
+                name: "默认 LLM".to_owned(),
+                api_key,
+                ..Default::default()
+            }]
+        }
+    }
+
     #[allow(dead_code)]
     pub fn default() -> Self {
         Self::new(BASE_URL, "")
@@ -26,6 +39,13 @@ impl Client {
 
     #[allow(dead_code)]
     pub fn new_without_proxy<S: Into<String>>(base_url: S, llm_api_key: S) -> Self {
+        Self::new_without_proxy_with_llm_configs(base_url, Self::legacy_llm_configs(llm_api_key))
+    }
+
+    pub fn new_without_proxy_with_llm_configs<B: Into<String>>(
+        base_url: B,
+        llm_configs: Vec<LLMConfig>,
+    ) -> Self {
         let jar = Arc::new(cookie::Jar::default());
         let cli = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
@@ -35,7 +55,7 @@ impl Client {
             .unwrap();
         let base_url = RwLock::new(base_url.into());
         let token = RwLock::new("".to_owned());
-        let llm_cli = llm::chat::new_llm_client(llm_api_key.into()).unwrap();
+        let llm_cli = llm::chat::new_llm_client(llm_configs).unwrap();
         let file_parser = file_parser::new_generic_file_reader();
         Self {
             cli,
@@ -48,6 +68,13 @@ impl Client {
     }
 
     pub fn new<S: Into<String>>(base_url: S, llm_api_key: S) -> Self {
+        Self::new_with_llm_configs(base_url, Self::legacy_llm_configs(llm_api_key))
+    }
+
+    pub fn new_with_llm_configs<B: Into<String>>(
+        base_url: B,
+        llm_configs: Vec<LLMConfig>,
+    ) -> Self {
         let jar = Arc::new(cookie::Jar::default());
         let cli = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
@@ -56,7 +83,7 @@ impl Client {
             .unwrap();
         let base_url = RwLock::new(base_url.into());
         let token = RwLock::new("".to_owned());
-        let llm_cli = llm::chat::new_llm_client(llm_api_key.into()).unwrap();
+        let llm_cli = llm::chat::new_llm_client(llm_configs).unwrap();
         let file_parser = file_parser::new_generic_file_reader();
         Self {
             cli,
@@ -68,8 +95,8 @@ impl Client {
         }
     }
 
-    pub async fn set_llm_api_key<S: Into<String>>(&self, api_key: S) {
-        self.llm_cli.set_api_key(api_key.into()).await;
+    pub async fn set_llm_configs(&self, configs: Vec<LLMConfig>) {
+        self.llm_cli.set_configs(configs).await;
     }
 
     pub async fn set_base_url<S: Into<String>>(&self, base_url: S) -> bool {

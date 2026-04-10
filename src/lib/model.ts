@@ -251,6 +251,20 @@ export interface DownloadTask {
 export type DownloadState = "downloading" | "succeed" | "fail" | "wait_retry";
 export type Theme = "light" | "dark";
 
+export interface LLMConfig {
+    name: string;
+    api_key: string;
+    base_url: string;
+    model: string;
+    enabled: boolean;
+}
+
+export interface SubtitleSummaryResult {
+    markdown: string;
+    reasoning_content: string;
+    subtitle_content: string;
+}
+
 export interface AppConfig {
     token: string;
     account_type: "Default" | "JI";
@@ -260,8 +274,12 @@ export interface AppConfig {
     video_cookies: string;
     proxy_port: number;
     course_assignment_file_bindings: Record<number, File[]>;
+    video_summary_cache: Record<string, SubtitleSummaryResult>;
     show_alert_map: Record<string, boolean>;
     llm_api_key: string;
+    llm_base_url: string;
+    llm_model: string;
+    llm_configs: LLMConfig[];
     theme: Option<Theme>;
     compact_mode: boolean;
     color_primary: Option<string>;
@@ -280,6 +298,28 @@ export interface ProgressPayload {
     uuid: string;
     processed: number;
     total: number;
+}
+
+export interface SubtitleSummaryProgressPayload {
+    uuid: string;
+    stage: string;
+    processed: number;
+    total: number;
+    message: string;
+}
+
+export interface SubtitleSummaryCompletedPayload {
+    uuid: string;
+    video_name: string;
+    summary: SubtitleSummaryResult;
+    saved_to_cache: boolean;
+    message: string;
+}
+
+export interface SubtitleSummaryFailedPayload {
+    uuid: string;
+    video_name: string;
+    error: string;
 }
 
 export interface Payload {

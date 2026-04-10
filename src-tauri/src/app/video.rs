@@ -90,6 +90,15 @@ impl App {
         Ok(())
     }
 
+    pub async fn get_subtitle(&self, canvas_course_id: i64) -> Result<String> {
+        let res = self.client.get_subtitle(canvas_course_id).await?;
+        self.client.convert_to_srt(&res.before_assembly_list)
+    }
+
+    pub async fn get_subtitle_text(&self, canvas_course_id: i64) -> Result<String> {
+        self.client.get_subtitle_text(canvas_course_id).await
+    }
+
     pub async fn download_ppt<F: Fn(ProgressPayload) + Send + 'static>(
         &self,
         canvas_course_id: i64,

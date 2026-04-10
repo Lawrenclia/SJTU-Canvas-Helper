@@ -157,9 +157,13 @@ impl App {
             return Err(AppError::AccountNotExists);
         }
         let config_path = App::get_config_path(account);
-        let config = App::read_config_from_file(&config_path)?;
+        let mut config = App::read_config_from_file(&config_path)?;
+        config.sync_legacy_llm_fields();
         let base_url = Self::get_base_url(&config.account_type);
         self.client.set_base_url(base_url).await;
+        self.client
+            .set_llm_configs(config.normalized_llm_configs())
+            .await;
         *self.config.write().await = config;
 
         let mut account_info = App::read_account_info()?;
@@ -192,10 +196,11 @@ impl App {
         tracing::info!("Read current account: {:?}", account_info);
         let config_path = App::get_config_path(&account_info.current_account);
         tracing::info!("Read config path: {}", config_path);
-        let config = App::read_config_from_file(&config_path).unwrap_or_default();
+        let mut config = App::read_config_from_file(&config_path).unwrap_or_default();
+        config.sync_legacy_llm_fields();
 
         let base_url = Self::get_base_url(&config.account_type);
-        let client = Client::new(base_url, &config.llm_api_key);
+        let client = Client::new_with_llm_configs(base_url, config.normalized_llm_configs());
 
         Self {
             client: Arc::new(client),
@@ -334,6 +339,10 @@ impl App {
 
     pub async fn get_config(&self) -> AppConfig {
         self.config.read().await.clone()
+    }
+
+    pub async fn get_current_account(&self) -> Account {
+        self.current_account.read().await.clone()
     }
 
     pub async fn get_raw_config(&self) -> Result<String> {
@@ -876,12 +885,16 @@ impl App {
     pub async fn save_config(&self, config: AppConfig) -> Result<()> {
         let account = self.current_account.read().await.clone();
         let config_path = App::get_config_path(&account);
+        let mut config = config;
+        config.sync_legacy_llm_fields();
         fs::write(&config_path, serde_json::to_vec(&config).unwrap())?;
         let base_url = Self::get_base_url(&config.account_type);
         if self.client.set_base_url(base_url).await {
             self.invalidate_cache()?;
         }
-        self.client.set_llm_api_key(&config.llm_api_key).await;
+        self.client
+            .set_llm_configs(config.normalized_llm_configs())
+            .await;
         *self.config.write().await = config;
         Ok(())
     }
@@ -890,12 +903,67 @@ impl App {
         self.client.chat(prompt).await
     }
 
+    pub async fn chat_with_configs<S: Into<String>>(
+        &self,
+        prompt: S,
+        configs: &[crate::model::LLMConfig],
+    ) -> Result<String> {
+        self.client
+            .chat_with_configs(prompt, configs)
+            .await
+    }
+
+    pub async fn list_llm_models(
+        &self,
+        config: &crate::model::LLMConfig,
+    ) -> Result<Vec<String>> {
+        self.client.list_llm_models(config).await
+    }
+
     pub async fn explain_file(&self, file: &File) -> Result<String> {
         self.client.explain_file(file).await
     }
     
-    pub async fn summarize_subtitle(&self, canvas_course_id: i64) -> Result<String> {
-        self.client.summarize_subtitle(canvas_course_id).await
+    pub async fn summarize_subtitle(
+        &self,
+        task_id: &str,
+        canvas_course_id: i64,
+        subtitle_content: Option<String>,
+        progress_handler: impl Fn(crate::model::SubtitleSummaryProgressPayload) + Send,
+    ) -> Result<crate::model::SubtitleSummaryResult> {
+        self.client
+            .summarize_subtitle(task_id, canvas_course_id, subtitle_content, progress_handler)
+            .await
+    }
+
+    pub async fn save_video_summary_cache_entry_for_account(
+        &self,
+        account: &Account,
+        cache_key: &str,
+        summary: &crate::model::SubtitleSummaryResult,
+    ) -> Result<()> {
+        let current_account = self.get_current_account().await;
+        if current_account == *account {
+            let mut config = self.config.write().await;
+            let mut next_config = (*config).clone();
+            next_config
+                .video_summary_cache
+                .insert(cache_key.to_owned(), summary.clone());
+            next_config.sync_legacy_llm_fields();
+            let config_path = App::get_config_path(account);
+            fs::write(&config_path, serde_json::to_vec(&next_config).unwrap())?;
+            *config = next_config;
+            return Ok(());
+        }
+
+        let config_path = App::get_config_path(account);
+        let mut config = App::read_config_from_file(&config_path).unwrap_or_default();
+        config
+            .video_summary_cache
+            .insert(cache_key.to_owned(), summary.clone());
+        config.sync_legacy_llm_fields();
+        fs::write(&config_path, serde_json::to_vec(&config).unwrap())?;
+        Ok(())
     }
 
     pub fn check_path(path: &str) -> bool {

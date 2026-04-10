@@ -1,6 +1,9 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub const DEFAULT_LLM_BASE_URL: &str = "https://api.deepseek.com";
+pub const DEFAULT_LLM_MODEL: &str = "deepseek-chat";
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Course {
     pub id: i64,
@@ -134,6 +137,50 @@ pub enum Theme {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LLMConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_llm_enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LLMChatResponse {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub reasoning_content: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleSummaryResult {
+    #[serde(default)]
+    pub markdown: String,
+    #[serde(default)]
+    pub reasoning_content: String,
+    #[serde(default)]
+    pub subtitle_content: String,
+}
+
+impl Default for LLMConfig {
+    fn default() -> Self {
+        Self {
+            name: Default::default(),
+            api_key: Default::default(),
+            base_url: DEFAULT_LLM_BASE_URL.to_owned(),
+            model: DEFAULT_LLM_MODEL.to_owned(),
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub token: String,
@@ -146,6 +193,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub llm_api_key: String,
     #[serde(default)]
+    pub llm_base_url: String,
+    #[serde(default)]
+    pub llm_model: String,
+    #[serde(default)]
+    pub llm_configs: Vec<LLMConfig>,
+    #[serde(default)]
     pub ja_auth_cookie: String,
     #[serde(default)]
     pub video_cookies: String,
@@ -157,6 +210,8 @@ pub struct AppConfig {
     pub jbox_login_info: JBoxLoginInfo,
     #[serde(default)]
     pub course_assignment_file_bindings: HashMap<i64, Vec<File>>,
+    #[serde(default)]
+    pub video_summary_cache: HashMap<String, SubtitleSummaryResult>,
     #[serde(default)]
     pub show_alert_map: HashMap<String, bool>,
     #[serde(default)]
@@ -180,8 +235,12 @@ impl Default for AppConfig {
             proxy_port: 3030,
             jbox_login_info: Default::default(),
             course_assignment_file_bindings: Default::default(),
+            video_summary_cache: Default::default(),
             show_alert_map: Default::default(),
             llm_api_key: Default::default(),
+            llm_base_url: Default::default(),
+            llm_model: Default::default(),
+            llm_configs: Default::default(),
             theme: Default::default(),
             compact_mode: Default::default(),
             color_primary: Default::default(),
@@ -193,11 +252,101 @@ fn default_proxy_port() -> u16 {
     3030
 }
 
+fn default_llm_enabled() -> bool {
+    true
+}
+
+impl AppConfig {
+    pub fn normalized_llm_configs(&self) -> Vec<LLMConfig> {
+        let mut configs = if self.llm_configs.is_empty() {
+            if self.llm_api_key.trim().is_empty()
+                && self.llm_base_url.trim().is_empty()
+                && self.llm_model.trim().is_empty()
+            {
+                vec![]
+            } else {
+                vec![LLMConfig {
+                    name: "默认 LLM".to_owned(),
+                    api_key: self.llm_api_key.clone(),
+                    base_url: self.llm_base_url.clone(),
+                    model: self.llm_model.clone(),
+                    enabled: true,
+                }]
+            }
+        } else {
+            self.llm_configs.clone()
+        };
+
+        for config in configs.iter_mut() {
+            if config.base_url.trim().is_empty() {
+                config.base_url = DEFAULT_LLM_BASE_URL.to_owned();
+            }
+            if config.model.trim().is_empty() {
+                config.model = DEFAULT_LLM_MODEL.to_owned();
+            }
+        }
+
+        configs
+    }
+
+    pub fn sync_legacy_llm_fields(&mut self) {
+        let configs = self.normalized_llm_configs();
+        self.llm_configs = configs.clone();
+
+        if let Some(config) = configs
+            .iter()
+            .find(|item| item.enabled && !item.api_key.trim().is_empty())
+            .or_else(|| configs.first())
+        {
+            self.llm_api_key = config.api_key.clone();
+            self.llm_base_url = config.base_url.clone();
+            self.llm_model = config.model.clone();
+        } else {
+            self.llm_api_key.clear();
+            self.llm_base_url.clear();
+            self.llm_model.clear();
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgressPayload {
     pub uuid: String,
     pub processed: u64,
     pub total: u64,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleSummaryProgressPayload {
+    pub uuid: String,
+    #[serde(default)]
+    pub stage: String,
+    pub processed: u64,
+    pub total: u64,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleSummaryCompletedPayload {
+    pub uuid: String,
+    #[serde(default)]
+    pub video_name: String,
+    #[serde(default)]
+    pub summary: SubtitleSummaryResult,
+    #[serde(default)]
+    pub saved_to_cache: bool,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleSummaryFailedPayload {
+    pub uuid: String,
+    #[serde(default)]
+    pub video_name: String,
+    #[serde(default)]
+    pub error: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
